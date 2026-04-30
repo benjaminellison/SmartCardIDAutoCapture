@@ -93,7 +93,10 @@
         </div>
 
         <label>OpenRouter API key
-          <input type="password" id="apiKeyInput" autocomplete="off" spellcheck="false" />
+          <span class="input-with-toggle">
+            <input type="password" id="apiKeyInput" autocomplete="off" spellcheck="false" />
+            <button type="button" id="apiKeyToggleBtn" class="reveal" aria-pressed="false" aria-label="Show API key">Show</button>
+          </span>
           <small>Stored in localStorage on this machine. Loaded from <code>VITE_OPENROUTER_API_KEY</code> if blank.</small>
         </label>
 

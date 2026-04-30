@@ -175,6 +175,7 @@ const settingsDialog = $<HTMLDialogElement>('settingsDialog');
 const closeSettingsBtn = $<HTMLButtonElement>('closeSettingsBtn');
 const doneSettingsBtn = $<HTMLButtonElement>('doneSettingsBtn');
 const apiKeyInput = $<HTMLInputElement>('apiKeyInput');
+const apiKeyToggleBtn = $<HTMLButtonElement>('apiKeyToggleBtn');
 const modelInput = $<HTMLInputElement>('modelInput');
 const mutedInput = $<HTMLInputElement>('mutedInput');
 const autoCaptureSettingInput = $<HTMLInputElement>('autoCaptureSettingInput');
@@ -1142,6 +1143,14 @@ doneSettingsBtn.addEventListener('click', () => settingsDialog.close());
 apiKeyInput.addEventListener('change', () => {
   state.settings.apiKey = apiKeyInput.value.trim();
   saveState();
+});
+
+apiKeyToggleBtn.addEventListener('click', () => {
+  const showing = apiKeyInput.type === 'text';
+  apiKeyInput.type = showing ? 'password' : 'text';
+  apiKeyToggleBtn.textContent = showing ? 'Show' : 'Hide';
+  apiKeyToggleBtn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+  apiKeyToggleBtn.setAttribute('aria-label', showing ? 'Show API key' : 'Hide API key');
 });
 modelInput.addEventListener('change', () => {
   state.settings.model = modelInput.value.trim() || DEFAULT_MODEL;

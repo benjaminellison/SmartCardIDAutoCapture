@@ -259,6 +259,20 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   border-color: var(--accent);
 }
 
+.input-with-toggle {
+  display: flex;
+  gap: 0.4rem;
+  align-items: stretch;
+}
+
+.input-with-toggle input { flex: 1; }
+
+.input-with-toggle button.reveal {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.85rem;
+}
+
 .empty-state {
   color: var(--muted);
   font-size: 0.9rem;
