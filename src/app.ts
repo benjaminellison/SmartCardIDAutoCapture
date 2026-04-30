@@ -28,6 +28,8 @@ type Thresholds = {
   stabilityMs: number;
 };
 
+type SerialFormat = 'hex8' | 'decimal' | 'either' | 'custom';
+
 type Settings = {
   selectedCameraId?: string;
   apiKey: string;
@@ -35,6 +37,10 @@ type Settings = {
   muted: boolean;
   autoCapture: boolean;
   thresholds: Thresholds;
+  serialFormat: SerialFormat;
+  customSerialRegex: string;
+  customSerialHint: string;
+  minConfidence: number;
 };
 
 type State = {
@@ -57,14 +63,15 @@ type OcrResult = {
 const STORAGE_KEY = 'scdl:state:v1';
 
 const DEFAULT_THRESHOLDS: Thresholds = {
-  whiteBrightness: 165,
-  whiteColorVariance: 28,
+  whiteBrightness: 150,
+  whiteColorVariance: 50,
   motionDelta: 6,
-  sharpnessMin: 40,
-  stabilityMs: 400
+  sharpnessMin: 80,
+  stabilityMs: 700
 };
 
 const DEFAULT_MODEL = 'baidu/qianfan-ocr-fast:free';
+const DEFAULT_MIN_CONFIDENCE = 0.5;
 
 const DETECTOR_W = 160;
 const DETECTOR_H = 120;
@@ -74,7 +81,8 @@ const ROI_W = Math.floor(DETECTOR_W * 0.6);
 const ROI_H = Math.floor(DETECTOR_H * 0.6);
 const DETECTOR_INTERVAL_MS = 100; // ~10fps
 
-const SERIAL_REGEX = /^([0-9A-F]{2} ){7}[0-9A-F]{2}$/;
+const HEX8_REGEX = /^([0-9A-F]{2} ){7}[0-9A-F]{2}$/;
+const DECIMAL_REGEX = /^[0-9]{6,}$/;
 
 const DEFAULT_HINT = 'Ready. Hold a card up or press Space to force a capture.';
 
@@ -91,7 +99,11 @@ function defaultState(): State {
       model: import.meta.env.VITE_OPENROUTER_MODEL ?? DEFAULT_MODEL,
       muted: false,
       autoCapture: true,
-      thresholds: { ...DEFAULT_THRESHOLDS }
+      thresholds: { ...DEFAULT_THRESHOLDS },
+      serialFormat: 'hex8',
+      customSerialRegex: '',
+      customSerialHint: '',
+      minConfidence: DEFAULT_MIN_CONFIDENCE
     }
   };
 }
@@ -169,6 +181,11 @@ const autoCaptureSettingInput = $<HTMLInputElement>('autoCaptureSettingInput');
 const testCaptureBtn = $<HTMLButtonElement>('testCaptureBtn');
 const resetThresholdsBtn = $<HTMLButtonElement>('resetThresholdsBtn');
 const liveMetrics = $<HTMLParagraphElement>('liveMetrics');
+const serialFormatInput = $<HTMLSelectElement>('serialFormatInput');
+const customSerialRegexInput = $<HTMLInputElement>('customSerialRegexInput');
+const customSerialHintInput = $<HTMLInputElement>('customSerialHintInput');
+const minConfidenceInput = $<HTMLInputElement>('minConfidenceInput');
+const minConfidenceOut = $<HTMLOutputElement>('minConfidenceOut');
 
 const thresholdInputs = {
   whiteBrightness: $<HTMLInputElement>('whiteBrightnessInput'),
@@ -278,8 +295,8 @@ async function startCamera(deviceId?: string): Promise<void> {
   }
   const constraints: MediaStreamConstraints = {
     video: deviceId
-      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-      : { width: { ideal: 1280 }, height: { ideal: 720 } },
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      : { width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false
   };
   currentStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -508,12 +525,35 @@ function detectorLoop(): void {
 // OCR (OpenRouter)
 // =====================================================================
 
-const OCR_PROMPT = `You are reading the back of a smart card. Extract:
-- card_type: short identifier (manufacturer/model name as printed)
-- serial: the printed serial number, formatted as 8 hex byte pairs separated by single spaces, uppercase (e.g. "12 34 AB CD 56 78 EF 90")
-- confidence: number 0-1 reflecting your confidence in the serial reading
+function buildOcrPrompt(): string {
+  let serialLine: string;
+  switch (state.settings.serialFormat) {
+    case 'hex8':
+      serialLine =
+        '- "serial": the printed serial as 8 hex byte pairs separated by single spaces, uppercase (e.g. "12 34 AB CD 56 78 EF 90")';
+      break;
+    case 'decimal':
+      serialLine =
+        '- "serial": the printed numeric serial number, digits only with no separators (e.g. "1234567890123")';
+      break;
+    case 'either':
+      serialLine =
+        '- "serial": the printed serial. If hex, format as 8 byte pairs separated by single spaces uppercase (e.g. "12 34 AB CD 56 78 EF 90"). If numeric, digits only with no separators.';
+      break;
+    case 'custom':
+      serialLine = `- "serial": the printed serial. ${state.settings.customSerialHint || 'Use the exact format printed on the card.'}`;
+      break;
+  }
+
+  return `You are reading the back of a smart card. Extract:
+- "card_type": short identifier (manufacturer or model name as printed)
+${serialLine}
+- "confidence": number 0-1 reflecting how confident you are in the serial. Use < 0.5 if you cannot read every character with certainty.
+
+Read carefully — small etched text on a white card. Output the serial EXACTLY as printed; do not guess characters or invent text. If a character is ambiguous, lower the confidence rather than guessing.
 
 Output ONLY a JSON object with exactly those three fields. No commentary, no markdown, no code fences.`;
+}
 
 async function callOcr(imageDataUrl: string): Promise<OcrResult> {
   const delays = [0, 1500, 4000]; // up to 3 attempts on transient failures
@@ -550,7 +590,7 @@ async function callOcrOnce(imageDataUrl: string): Promise<OcrResult> {
         {
           role: 'user',
           content: [
-            { type: 'text', text: OCR_PROMPT },
+            { type: 'text', text: buildOcrPrompt() },
             { type: 'image_url', image_url: { url: imageDataUrl } }
           ]
         }
@@ -613,14 +653,29 @@ function normalizeSerial(s: string): string {
 }
 
 function isValidSerial(s: string): boolean {
-  return SERIAL_REGEX.test(normalizeSerial(s));
+  const norm = normalizeSerial(s);
+  if (!norm) return false;
+  switch (state.settings.serialFormat) {
+    case 'hex8':
+      return HEX8_REGEX.test(norm);
+    case 'decimal':
+      return DECIMAL_REGEX.test(norm);
+    case 'either':
+      return HEX8_REGEX.test(norm) || DECIMAL_REGEX.test(norm);
+    case 'custom':
+      try {
+        return new RegExp(state.settings.customSerialRegex).test(norm);
+      } catch {
+        return false;
+      }
+  }
 }
 
 // =====================================================================
 // Capture pipeline
 // =====================================================================
 
-function captureFullFrame(): { fullJpeg: string; thumbJpeg: string } | null {
+function captureFullFrame(): { fullPng: string; thumbJpeg: string; fullSharpness: number } | null {
   if (video.videoWidth === 0) return null;
   const w = video.videoWidth;
   const h = video.videoHeight;
@@ -631,7 +686,8 @@ function captureFullFrame(): { fullJpeg: string; thumbJpeg: string } | null {
   const fctx = full.getContext('2d');
   if (!fctx) return null;
   fctx.drawImage(video, 0, 0, w, h);
-  const fullJpeg = full.toDataURL('image/jpeg', 0.9);
+  // PNG: lossless. Slightly bigger upload but materially better OCR on small etched text.
+  const fullPng = full.toDataURL('image/png');
 
   const thumbW = 320;
   const thumbH = Math.round((h * thumbW) / w);
@@ -641,9 +697,30 @@ function captureFullFrame(): { fullJpeg: string; thumbJpeg: string } | null {
   const tctx = thumb.getContext('2d');
   if (!tctx) return null;
   tctx.drawImage(full, 0, 0, thumbW, thumbH);
-  const thumbJpeg = thumb.toDataURL('image/jpeg', 0.7);
+  const thumbJpeg = thumb.toDataURL('image/jpeg', 0.75);
 
-  return { fullJpeg, thumbJpeg };
+  // Compute Laplacian variance on a 480-wide grayscale of the actual capture.
+  // The detector's 60x90 ROI sharpness can read high during autofocus hunt — this
+  // gives us a real-resolution number to log alongside the OCR result.
+  const checkW = 480;
+  const checkH = Math.round((h * checkW) / w);
+  const check = document.createElement('canvas');
+  check.width = checkW;
+  check.height = checkH;
+  const cctx = check.getContext('2d');
+  let fullSharpness = 0;
+  if (cctx) {
+    cctx.drawImage(full, 0, 0, checkW, checkH);
+    const { data } = cctx.getImageData(0, 0, checkW, checkH);
+    const gray = new Uint8ClampedArray(checkW * checkH);
+    for (let i = 0; i < gray.length; i++) {
+      const j = i * 4;
+      gray[i] = (data[j] * 0.299 + data[j + 1] * 0.587 + data[j + 2] * 0.114) | 0;
+    }
+    fullSharpness = laplacianVariance(gray, checkW, checkH);
+  }
+
+  return { fullPng, thumbJpeg, fullSharpness };
 }
 
 async function triggerCapture(): Promise<void> {
@@ -675,15 +752,20 @@ async function triggerCapture(): Promise<void> {
 
     const start = performance.now();
     try {
-      const result = await callOcr(frames.fullJpeg);
+      const result = await callOcr(frames.fullPng);
       const ms = Math.round(performance.now() - start);
       const conf = result.confidence != null ? result.confidence.toFixed(2) : 'n/a';
       console.log(
-        `OCR ${ms}ms  conf=${conf}  type=${JSON.stringify(result.cardType)}  serial=${JSON.stringify(result.serial)}`
+        `OCR ${ms}ms  conf=${conf}  fullSharp=${frames.fullSharpness.toFixed(0)}  ` +
+          `type=${JSON.stringify(result.cardType)}  serial=${JSON.stringify(result.serial)}`
       );
 
       const normalized = normalizeSerial(result.serial);
-      if (isValidSerial(normalized)) {
+      const formatOk = isValidSerial(normalized);
+      const confOk =
+        result.confidence == null || result.confidence >= state.settings.minConfidence;
+
+      if (formatOk && confOk) {
         playGood();
         addCapturedRow({
           id: crypto.randomUUID(),
@@ -695,20 +777,23 @@ async function triggerCapture(): Promise<void> {
         flashStatus(
           dup ? 'review' : 'added',
           dup ? 'DUPLICATE ⚠' : 'ADDED ✓',
-          `${ms}ms · ${dup ? 'serial already in list' : `${state.captured.length} captured`}`
+          `${ms}ms · ${dup ? 'serial already in list' : `${state.captured.length} captured`} · conf ${conf}`
         );
         if (dup) playBuzz();
       } else {
+        const reason = !formatOk
+          ? "serial didn't match format"
+          : `confidence ${conf} < ${state.settings.minConfidence}`;
         playBuzz();
         addReviewItem({
           id: crypto.randomUUID(),
           thumbnailDataUrl: frames.thumbJpeg,
-          rawText: result.raw,
+          rawText: `(conf ${conf}) ${result.raw}`,
           cardType: result.cardType.trim(),
           serial: result.serial.trim(),
           capturedAt: Date.now()
         });
-        flashStatus('review', 'REVIEW ⚠', `${ms}ms · serial didn't match expected format`);
+        flashStatus('review', 'REVIEW ⚠', `${ms}ms · ${reason}`);
       }
     } catch (err) {
       console.error('OCR error', err);
@@ -1029,6 +1114,20 @@ function syncSettingsToInputs(): void {
     input.value = String(state.settings.thresholds[k]);
     out.value = String(state.settings.thresholds[k]);
   }
+
+  serialFormatInput.value = state.settings.serialFormat;
+  customSerialRegexInput.value = state.settings.customSerialRegex;
+  customSerialHintInput.value = state.settings.customSerialHint;
+  minConfidenceInput.value = String(state.settings.minConfidence);
+  minConfidenceOut.value = state.settings.minConfidence.toFixed(2);
+  syncCustomSerialVisibility();
+}
+
+function syncCustomSerialVisibility(): void {
+  const isCustom = state.settings.serialFormat === 'custom';
+  document.querySelectorAll<HTMLLabelElement>('label.custom-only[data-when="custom"]').forEach((el) => {
+    el.hidden = !isCustom;
+  });
 }
 
 function openSettings(): void {
@@ -1073,6 +1172,26 @@ resetThresholdsBtn.addEventListener('click', () => {
   state.settings.thresholds = { ...DEFAULT_THRESHOLDS };
   saveState();
   syncSettingsToInputs();
+});
+
+serialFormatInput.addEventListener('change', () => {
+  state.settings.serialFormat = serialFormatInput.value as SerialFormat;
+  saveState();
+  syncCustomSerialVisibility();
+});
+customSerialRegexInput.addEventListener('change', () => {
+  state.settings.customSerialRegex = customSerialRegexInput.value.trim();
+  saveState();
+});
+customSerialHintInput.addEventListener('change', () => {
+  state.settings.customSerialHint = customSerialHintInput.value.trim();
+  saveState();
+});
+minConfidenceInput.addEventListener('input', () => {
+  const v = Number(minConfidenceInput.value);
+  state.settings.minConfidence = v;
+  minConfidenceOut.value = v.toFixed(2);
+  saveState();
 });
 
 testCaptureBtn.addEventListener('click', () => {

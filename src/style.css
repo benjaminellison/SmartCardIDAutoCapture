@@ -390,7 +390,8 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   gap: 1.25rem;
 }
 
-fieldset.thresholds {
+fieldset.thresholds,
+fieldset.serial-format {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.75rem 1rem;
@@ -398,26 +399,30 @@ fieldset.thresholds {
   gap: 0.6rem;
 }
 
-fieldset.thresholds legend {
+fieldset.thresholds legend,
+fieldset.serial-format legend {
   font-size: 0.85rem;
   font-weight: 500;
   padding: 0 0.4rem;
 }
 
-fieldset.thresholds label {
+fieldset.thresholds label,
+fieldset.serial-format label {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0.25rem;
 }
 
-fieldset.thresholds label > span {
+fieldset.thresholds label > span,
+fieldset.serial-format label > span {
   display: flex;
   justify-content: space-between;
   font-size: 0.82rem;
   color: var(--muted);
 }
 
-fieldset.thresholds output {
+fieldset.thresholds output,
+fieldset.serial-format output {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
   color: inherit;
 }
