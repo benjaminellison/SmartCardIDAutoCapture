@@ -141,6 +141,16 @@ video {
   min-height: 1.2em;
 }
 
+.metrics-inline {
+  margin: 0;
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.metrics-inline .ok { color: var(--good); }
+.metrics-inline .bad { color: var(--bad); }
+
 .captured-header {
   display: flex;
   justify-content: space-between;

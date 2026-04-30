@@ -145,6 +145,7 @@ const autoCaptureToggle = $<HTMLInputElement>('autoCaptureToggle');
 const statusEl = $<HTMLDivElement>('status');
 const hintEl = $<HTMLParagraphElement>('hint');
 const roiOverlay = $<HTMLDivElement>('roiOverlay');
+const metricsInline = $<HTMLParagraphElement>('metricsInline');
 const capturedCount = $<HTMLSpanElement>('capturedCount');
 const capturedTbody = $<HTMLTableSectionElement>('capturedTbody');
 const emptyState = $<HTMLParagraphElement>('emptyState');
@@ -445,6 +446,7 @@ function detectorLoop(): void {
 
   if (!state.settings.autoCapture) {
     roiOverlay.className = 'roi-overlay hidden';
+    metricsInline.hidden = true;
     return;
   }
   roiOverlay.className = 'roi-overlay';
@@ -453,6 +455,17 @@ function detectorLoop(): void {
   const isWhiteCard = m.brightness > t.whiteBrightness && m.colorVariance < t.whiteColorVariance;
   const isStill = m.motion < t.motionDelta;
   const isSharp = m.sharpness > t.sharpnessMin;
+
+  // Always-visible live metrics for tuning
+  metricsInline.hidden = false;
+  const fmt = (val: number, ok: boolean) =>
+    `<span class="${ok ? 'ok' : 'bad'}">${val.toFixed(0)}</span>`;
+  metricsInline.innerHTML =
+    `bright ${fmt(m.brightness, m.brightness > t.whiteBrightness)} ` +
+    `cvar ${fmt(m.colorVariance, m.colorVariance < t.whiteColorVariance)} ` +
+    `motion ${fmt(m.motion, isStill)} ` +
+    `sharp ${fmt(m.sharpness, isSharp)} ` +
+    `· state ${detectorState}`;
 
   if (captureInFlight) return;
 
@@ -503,6 +516,26 @@ const OCR_PROMPT = `You are reading the back of a smart card. Extract:
 Output ONLY a JSON object with exactly those three fields. No commentary, no markdown, no code fences.`;
 
 async function callOcr(imageDataUrl: string): Promise<OcrResult> {
+  const delays = [0, 1500, 4000]; // up to 3 attempts on transient failures
+  let lastErr: Error = new Error('OCR failed');
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt] > 0) {
+      setStatus('ocr', `OCR retry ${attempt}…`, 'Provider rate-limited; backing off.');
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+    try {
+      return await callOcrOnce(imageDataUrl);
+    } catch (err) {
+      lastErr = err as Error;
+      const msg = lastErr.message;
+      const isTransient = /^HTTP 429/.test(msg) || /^HTTP 5\d\d/.test(msg) || /network|fetch failed/i.test(msg);
+      if (!isTransient) throw err;
+    }
+  }
+  throw lastErr;
+}
+
+async function callOcrOnce(imageDataUrl: string): Promise<OcrResult> {
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
