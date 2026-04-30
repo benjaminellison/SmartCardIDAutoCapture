@@ -153,6 +153,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
 const video = $<HTMLVideoElement>('video');
 const cameraSelect = $<HTMLSelectElement>('cameraSelect');
 const snapBtn = $<HTMLButtonElement>('snapBtn');
+const pauseBtn = $<HTMLButtonElement>('pauseBtn');
 const autoCaptureToggle = $<HTMLInputElement>('autoCaptureToggle');
 const statusEl = $<HTMLDivElement>('status');
 const hintEl = $<HTMLParagraphElement>('hint');
@@ -285,6 +286,7 @@ function playBuzz(): void {
 // =====================================================================
 
 let currentStream: MediaStream | null = null;
+let cameraPaused = false;
 
 async function listCameras(): Promise<MediaDeviceInfo[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();
@@ -1261,6 +1263,36 @@ autoCaptureToggle.addEventListener('change', () => {
 
 snapBtn.addEventListener('click', () => {
   void triggerCapture();
+});
+
+async function setCameraPaused(paused: boolean): Promise<void> {
+  cameraPaused = paused;
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  if (paused) {
+    if (currentStream) {
+      currentStream.getTracks().forEach((t) => t.stop());
+      currentStream = null;
+    }
+    video.srcObject = null;
+    prevGray = null;
+    detectorState = 'NO_CARD';
+    stableSince = 0;
+    metricsRow.hidden = true;
+    roiOverlay.className = 'roi-overlay hidden';
+    setStatus('idle', 'PAUSED', 'Camera off. Click Resume to continue.');
+  } else {
+    setStatus('idle', 'WAITING FOR CARD', DEFAULT_HINT);
+    try {
+      await startCamera(state.settings.selectedCameraId);
+    } catch (err) {
+      console.error('Failed to resume camera', err);
+      setStatus('error', 'CAMERA ERROR', 'Could not restart the camera.');
+    }
+  }
+}
+
+pauseBtn.addEventListener('click', () => {
+  void setCameraPaused(!cameraPaused);
 });
 
 // =====================================================================
