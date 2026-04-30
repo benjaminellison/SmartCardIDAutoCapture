@@ -1,5 +1,9 @@
 import './style.css';
 
+// =====================================================================
+// Types
+// =====================================================================
+
 type CapturedRow = {
   id: string;
   cardType: string;
@@ -7,14 +11,126 @@ type CapturedRow = {
   addedAt: number;
 };
 
-type State = {
-  captured: CapturedRow[];
-  settings: {
-    selectedCameraId?: string;
-  };
+type ReviewItem = {
+  id: string;
+  thumbnailDataUrl: string;
+  rawText: string;
+  cardType: string;
+  serial: string;
+  capturedAt: number;
 };
 
+type Thresholds = {
+  whiteBrightness: number;
+  whiteColorVariance: number;
+  motionDelta: number;
+  sharpnessMin: number;
+  stabilityMs: number;
+};
+
+type Settings = {
+  selectedCameraId?: string;
+  apiKey: string;
+  model: string;
+  muted: boolean;
+  autoCapture: boolean;
+  thresholds: Thresholds;
+};
+
+type State = {
+  captured: CapturedRow[];
+  review: ReviewItem[];
+  settings: Settings;
+};
+
+type OcrResult = {
+  cardType: string;
+  serial: string;
+  confidence?: number;
+  raw: string;
+};
+
+// =====================================================================
+// Constants
+// =====================================================================
+
 const STORAGE_KEY = 'scdl:state:v1';
+
+const DEFAULT_THRESHOLDS: Thresholds = {
+  whiteBrightness: 165,
+  whiteColorVariance: 28,
+  motionDelta: 6,
+  sharpnessMin: 40,
+  stabilityMs: 400
+};
+
+const DEFAULT_MODEL = 'baidu/qianfan-ocr-fast:free';
+
+const DETECTOR_W = 160;
+const DETECTOR_H = 120;
+const ROI_X = Math.floor(DETECTOR_W * 0.2);
+const ROI_Y = Math.floor(DETECTOR_H * 0.2);
+const ROI_W = Math.floor(DETECTOR_W * 0.6);
+const ROI_H = Math.floor(DETECTOR_H * 0.6);
+const DETECTOR_INTERVAL_MS = 100; // ~10fps
+
+const SERIAL_REGEX = /^([0-9A-F]{2} ){7}[0-9A-F]{2}$/;
+
+const DEFAULT_HINT = 'Ready. Hold a card up or press Space to force a capture.';
+
+// =====================================================================
+// State
+// =====================================================================
+
+function defaultState(): State {
+  return {
+    captured: [],
+    review: [],
+    settings: {
+      apiKey: import.meta.env.VITE_OPENROUTER_API_KEY ?? '',
+      model: import.meta.env.VITE_OPENROUTER_MODEL ?? DEFAULT_MODEL,
+      muted: false,
+      autoCapture: true,
+      thresholds: { ...DEFAULT_THRESHOLDS }
+    }
+  };
+}
+
+function loadState(): State {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaultState();
+    const parsed = JSON.parse(raw) as Partial<State>;
+    const def = defaultState();
+    return {
+      captured: parsed.captured ?? [],
+      review: parsed.review ?? [],
+      settings: {
+        ...def.settings,
+        ...(parsed.settings ?? {}),
+        apiKey: parsed.settings?.apiKey || def.settings.apiKey,
+        model: parsed.settings?.model || def.settings.model,
+        thresholds: {
+          ...def.settings.thresholds,
+          ...(parsed.settings?.thresholds ?? {})
+        }
+      }
+    };
+  } catch (err) {
+    console.warn('Failed to load state', err);
+    return defaultState();
+  }
+}
+
+function saveState(): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+let state: State = loadState();
+
+// =====================================================================
+// DOM refs
+// =====================================================================
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -25,8 +141,10 @@ const $ = <T extends HTMLElement>(id: string): T => {
 const video = $<HTMLVideoElement>('video');
 const cameraSelect = $<HTMLSelectElement>('cameraSelect');
 const snapBtn = $<HTMLButtonElement>('snapBtn');
+const autoCaptureToggle = $<HTMLInputElement>('autoCaptureToggle');
 const statusEl = $<HTMLDivElement>('status');
 const hintEl = $<HTMLParagraphElement>('hint');
+const roiOverlay = $<HTMLDivElement>('roiOverlay');
 const capturedCount = $<HTMLSpanElement>('capturedCount');
 const capturedTbody = $<HTMLTableSectionElement>('capturedTbody');
 const emptyState = $<HTMLParagraphElement>('emptyState');
@@ -34,44 +152,118 @@ const downloadBtn = $<HTMLButtonElement>('downloadBtn');
 const copyBtn = $<HTMLButtonElement>('copyBtn');
 const clearBtn = $<HTMLButtonElement>('clearBtn');
 
-let state: State = loadState();
-let currentStream: MediaStream | null = null;
+const reviewSection = $<HTMLElement>('reviewSection');
+const reviewBody = $<HTMLDivElement>('reviewBody');
+const reviewCount = $<HTMLSpanElement>('reviewCount');
+const toggleReviewBtn = $<HTMLButtonElement>('toggleReviewBtn');
+
+const settingsBtn = $<HTMLButtonElement>('settingsBtn');
+const settingsDialog = $<HTMLDialogElement>('settingsDialog');
+const closeSettingsBtn = $<HTMLButtonElement>('closeSettingsBtn');
+const doneSettingsBtn = $<HTMLButtonElement>('doneSettingsBtn');
+const apiKeyInput = $<HTMLInputElement>('apiKeyInput');
+const modelInput = $<HTMLInputElement>('modelInput');
+const mutedInput = $<HTMLInputElement>('mutedInput');
+const autoCaptureSettingInput = $<HTMLInputElement>('autoCaptureSettingInput');
+const testCaptureBtn = $<HTMLButtonElement>('testCaptureBtn');
+const resetThresholdsBtn = $<HTMLButtonElement>('resetThresholdsBtn');
+const liveMetrics = $<HTMLParagraphElement>('liveMetrics');
+
+const thresholdInputs = {
+  whiteBrightness: $<HTMLInputElement>('whiteBrightnessInput'),
+  whiteColorVariance: $<HTMLInputElement>('whiteColorVarianceInput'),
+  motionDelta: $<HTMLInputElement>('motionDeltaInput'),
+  sharpnessMin: $<HTMLInputElement>('sharpnessMinInput'),
+  stabilityMs: $<HTMLInputElement>('stabilityMsInput')
+};
+
+const thresholdOutputs = {
+  whiteBrightness: $<HTMLOutputElement>('whiteBrightnessOut'),
+  whiteColorVariance: $<HTMLOutputElement>('whiteColorVarianceOut'),
+  motionDelta: $<HTMLOutputElement>('motionDeltaOut'),
+  sharpnessMin: $<HTMLOutputElement>('sharpnessMinOut'),
+  stabilityMs: $<HTMLOutputElement>('stabilityMsOut')
+};
+
+// =====================================================================
+// Status indicator
+// =====================================================================
+
+type StatusKind = 'idle' | 'steady' | 'ocr' | 'added' | 'review' | 'error';
+
 let flashTimer: number | undefined;
 
-function loadState(): State {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<State>;
-      return {
-        captured: parsed.captured ?? [],
-        settings: parsed.settings ?? {}
-      };
-    }
-  } catch (err) {
-    console.warn('Failed to load state', err);
-  }
-  return { captured: [], settings: {} };
-}
-
-function saveState(): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-}
-
-const DEFAULT_HINT = 'Press Space to capture the current frame.';
-
-function setStatus(text: string, hint?: string): void {
+function setStatus(kind: StatusKind, text: string, hint?: string): void {
+  statusEl.className = `status ${kind}`;
   statusEl.textContent = text;
   if (hint !== undefined) hintEl.textContent = hint;
 }
 
-function flashStatus(text: string, duration = 700): void {
-  setStatus(text);
+function flashStatus(kind: StatusKind, text: string, hint?: string, duration = 1200): void {
+  setStatus(kind, text, hint);
   if (flashTimer !== undefined) window.clearTimeout(flashTimer);
   flashTimer = window.setTimeout(() => {
-    setStatus('WAITING FOR CARD', DEFAULT_HINT);
+    setStatus('idle', 'WAITING FOR CARD', DEFAULT_HINT);
   }, duration);
 }
+
+// =====================================================================
+// Audio feedback
+// =====================================================================
+
+let audioCtx: AudioContext | null = null;
+
+function getAudioCtx(): AudioContext | null {
+  if (state.settings.muted) return null;
+  if (!audioCtx) {
+    try {
+      audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    } catch {
+      return null;
+    }
+  }
+  if (audioCtx.state === 'suspended') void audioCtx.resume();
+  return audioCtx;
+}
+
+function playTone(frequency: number, durationMs: number, type: OscillatorType = 'sine', peakGain = 0.18, attackMs = 8, startOffsetMs = 0) {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = frequency;
+  const start = ctx.currentTime + startOffsetMs / 1000;
+  const attack = start + attackMs / 1000;
+  const end = start + durationMs / 1000;
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(peakGain, attack);
+  gain.gain.exponentialRampToValueAtTime(0.0001, end);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(start);
+  osc.stop(end + 0.01);
+}
+
+function playClick(): void {
+  playTone(1200, 60, 'sine', 0.22);
+}
+
+function playGood(): void {
+  // Rising chord: C5, E5, G5
+  playTone(523.25, 180, 'sine', 0.16, 8, 0);
+  playTone(659.25, 180, 'sine', 0.16, 8, 80);
+  playTone(783.99, 240, 'sine', 0.16, 8, 160);
+}
+
+function playBuzz(): void {
+  playTone(110, 380, 'sawtooth', 0.18, 10);
+}
+
+// =====================================================================
+// Camera
+// =====================================================================
+
+let currentStream: MediaStream | null = null;
 
 async function listCameras(): Promise<MediaDeviceInfo[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();
@@ -84,7 +276,9 @@ async function startCamera(deviceId?: string): Promise<void> {
     currentStream = null;
   }
   const constraints: MediaStreamConstraints = {
-    video: deviceId ? { deviceId: { exact: deviceId } } : true,
+    video: deviceId
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      : { width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: false
   };
   currentStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -93,16 +287,15 @@ async function startCamera(deviceId?: string): Promise<void> {
 
 async function initCamera(): Promise<void> {
   if (!navigator.mediaDevices?.getUserMedia) {
-    setStatus('CAMERA UNAVAILABLE', 'Your browser does not support getUserMedia.');
+    setStatus('error', 'CAMERA UNAVAILABLE', 'Your browser does not support getUserMedia.');
     return;
   }
   try {
-    // Initial permission grant — also unlocks device labels in enumerateDevices.
     const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
     tmp.getTracks().forEach((t) => t.stop());
   } catch (err) {
     console.warn('Camera permission denied', err);
-    setStatus('CAMERA DENIED', 'Grant camera access and reload the page.');
+    setStatus('error', 'CAMERA DENIED', 'Grant camera access and reload the page.');
     return;
   }
 
@@ -116,9 +309,10 @@ async function initCamera(): Promise<void> {
   });
 
   const remembered = state.settings.selectedCameraId;
-  const preferred = remembered && cameras.some((c) => c.deviceId === remembered)
-    ? remembered
-    : cameras[0]?.deviceId;
+  const preferred =
+    remembered && cameras.some((c) => c.deviceId === remembered)
+      ? remembered
+      : cameras[0]?.deviceId;
 
   if (preferred) {
     cameraSelect.value = preferred;
@@ -126,12 +320,13 @@ async function initCamera(): Promise<void> {
       await startCamera(preferred);
       state.settings.selectedCameraId = preferred;
       saveState();
+      setStatus('idle', 'WAITING FOR CARD', DEFAULT_HINT);
     } catch (err) {
       console.error('Failed to start camera', err);
-      setStatus('CAMERA ERROR', 'Could not start the selected camera.');
+      setStatus('error', 'CAMERA ERROR', 'Could not start the selected camera.');
     }
   } else {
-    setStatus('NO CAMERA', 'No video input devices found.');
+    setStatus('error', 'NO CAMERA', 'No video input devices found.');
   }
 }
 
@@ -143,54 +338,406 @@ cameraSelect.addEventListener('change', async () => {
     await startCamera(id);
   } catch (err) {
     console.error(err);
-    setStatus('CAMERA ERROR', 'Could not start the selected camera.');
+    setStatus('error', 'CAMERA ERROR', 'Could not start the selected camera.');
   }
 });
 
-function captureFrame(): void {
-  // Step 1: no OCR yet. Just add an empty row, ready for inline edit.
-  // The captured frame will be wired to OpenRouter in step 2.
-  flashStatus('CAPTURED');
-  addRow({
-    id: crypto.randomUUID(),
-    cardType: '',
-    serial: '',
-    addedAt: Date.now()
-  });
+// =====================================================================
+// Auto-capture detector
+// =====================================================================
+
+const detectorCanvas = document.createElement('canvas');
+detectorCanvas.width = DETECTOR_W;
+detectorCanvas.height = DETECTOR_H;
+const detectorCtx = (() => {
+  const c = detectorCanvas.getContext('2d', { willReadFrequently: true });
+  if (!c) throw new Error('Failed to create detector canvas context');
+  return c;
+})();
+
+let prevGray: Uint8ClampedArray | null = null;
+let detectorState: 'NO_CARD' | 'CARD_MOVING' | 'COOLDOWN' = 'NO_CARD';
+let stableSince = 0;
+let lastDetectorTick = 0;
+let captureInFlight = false;
+
+type Metrics = { brightness: number; colorVariance: number; motion: number; sharpness: number };
+
+function laplacianVariance(gray: Uint8ClampedArray, w: number, h: number): number {
+  let sum = 0;
+  let sumSq = 0;
+  let n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const v = -4 * gray[i] + gray[i - 1] + gray[i + 1] + gray[i - w] + gray[i + w];
+      sum += v;
+      sumSq += v * v;
+      n++;
+    }
+  }
+  if (n === 0) return 0;
+  const mean = sum / n;
+  return sumSq / n - mean * mean;
 }
 
-function addRow(row: CapturedRow): void {
+function computeMetrics(): Metrics | null {
+  if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+  detectorCtx.drawImage(video, 0, 0, DETECTOR_W, DETECTOR_H);
+  const { data } = detectorCtx.getImageData(0, 0, DETECTOR_W, DETECTOR_H);
+
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  const gray = new Uint8ClampedArray(ROI_W * ROI_H);
+  for (let y = 0; y < ROI_H; y++) {
+    for (let x = 0; x < ROI_W; x++) {
+      const srcIdx = ((y + ROI_Y) * DETECTOR_W + (x + ROI_X)) * 4;
+      const r = data[srcIdx];
+      const g = data[srcIdx + 1];
+      const b = data[srcIdx + 2];
+      sumR += r;
+      sumG += g;
+      sumB += b;
+      gray[y * ROI_W + x] = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+    }
+  }
+  const pixelCount = ROI_W * ROI_H;
+  const meanR = sumR / pixelCount;
+  const meanG = sumG / pixelCount;
+  const meanB = sumB / pixelCount;
+  const brightness = (meanR + meanG + meanB) / 3;
+  const colorVariance =
+    Math.max(meanR, meanG, meanB) - Math.min(meanR, meanG, meanB);
+
+  let motion = 0;
+  if (prevGray && prevGray.length === gray.length) {
+    let sum = 0;
+    for (let i = 0; i < gray.length; i++) {
+      sum += Math.abs(gray[i] - prevGray[i]);
+    }
+    motion = sum / gray.length;
+  } else {
+    motion = 999;
+  }
+  prevGray = gray;
+
+  const sharpness = laplacianVariance(gray, ROI_W, ROI_H);
+  return { brightness, colorVariance, motion, sharpness };
+}
+
+function detectorLoop(): void {
+  requestAnimationFrame(detectorLoop);
+  const now = performance.now();
+  if (now - lastDetectorTick < DETECTOR_INTERVAL_MS) return;
+  lastDetectorTick = now;
+
+  const m = computeMetrics();
+  if (!m) return;
+
+  // Live metrics in settings dialog
+  if (settingsDialog.open) {
+    liveMetrics.textContent =
+      `bright=${m.brightness.toFixed(0)}  cvar=${m.colorVariance.toFixed(0)}  ` +
+      `motion=${m.motion.toFixed(1)}  sharp=${m.sharpness.toFixed(0)}  ` +
+      `state=${detectorState}`;
+  }
+
+  if (!state.settings.autoCapture) {
+    roiOverlay.className = 'roi-overlay hidden';
+    return;
+  }
+  roiOverlay.className = 'roi-overlay';
+
+  const t = state.settings.thresholds;
+  const isWhiteCard = m.brightness > t.whiteBrightness && m.colorVariance < t.whiteColorVariance;
+  const isStill = m.motion < t.motionDelta;
+  const isSharp = m.sharpness > t.sharpnessMin;
+
+  if (captureInFlight) return;
+
+  if (detectorState === 'COOLDOWN') {
+    // Re-arm on motion (peel)
+    if (!isStill || !isWhiteCard) {
+      detectorState = 'NO_CARD';
+      stableSince = 0;
+    }
+    return;
+  }
+
+  if (!isWhiteCard) {
+    detectorState = 'NO_CARD';
+    stableSince = 0;
+    roiOverlay.className = 'roi-overlay';
+    if (!flashTimer) setStatus('idle', 'WAITING FOR CARD', DEFAULT_HINT);
+    return;
+  }
+
+  if (!isStill || !isSharp) {
+    detectorState = 'CARD_MOVING';
+    stableSince = 0;
+    roiOverlay.className = 'roi-overlay detected';
+    if (!flashTimer) setStatus('steady', 'STEADY…', isSharp ? 'Hold still.' : 'Focusing…');
+    return;
+  }
+
+  // White, still, sharp
+  roiOverlay.className = 'roi-overlay ready';
+  if (stableSince === 0) stableSince = now;
+  if (now - stableSince >= t.stabilityMs) {
+    detectorState = 'COOLDOWN';
+    stableSince = 0;
+    void triggerCapture();
+  }
+}
+
+// =====================================================================
+// OCR (OpenRouter)
+// =====================================================================
+
+const OCR_PROMPT = `You are reading the back of a smart card. Extract:
+- card_type: short identifier (manufacturer/model name as printed)
+- serial: the printed serial number, formatted as 8 hex byte pairs separated by single spaces, uppercase (e.g. "12 34 AB CD 56 78 EF 90")
+- confidence: number 0-1 reflecting your confidence in the serial reading
+
+Output ONLY a JSON object with exactly those three fields. No commentary, no markdown, no code fences.`;
+
+async function callOcr(imageDataUrl: string): Promise<OcrResult> {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${state.settings.apiKey}`,
+      'HTTP-Referer': window.location.origin,
+      'X-Title': 'Smart Card Disposal Logger'
+    },
+    body: JSON.stringify({
+      model: state.settings.model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: OCR_PROMPT },
+            { type: 'image_url', image_url: { url: imageDataUrl } }
+          ]
+        }
+      ],
+      response_format: { type: 'json_object' }
+    })
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 240)}`);
+  }
+  const json = await res.json();
+  const content: string = json.choices?.[0]?.message?.content ?? '';
+  return parseOcrResponse(content);
+}
+
+function parseOcrResponse(content: string): OcrResult {
+  const raw = content;
+  const cleaned = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
+
+  const tryParse = (s: string): OcrResult | null => {
+    try {
+      const obj = JSON.parse(s) as Record<string, unknown>;
+      return {
+        cardType: String(obj.card_type ?? obj.cardType ?? '').trim(),
+        serial: String(obj.serial ?? '').trim(),
+        confidence:
+          typeof obj.confidence === 'number' ? obj.confidence : undefined,
+        raw
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = tryParse(cleaned);
+  if (direct) return direct;
+
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) {
+    const obj = tryParse(match[0]);
+    if (obj) return obj;
+  }
+
+  // Fallback: regex out a hex serial from raw text
+  const serialMatch = raw.match(/(?:[0-9A-Fa-f]{2}\s+){7}[0-9A-Fa-f]{2}/);
+  return {
+    cardType: '',
+    serial: serialMatch ? serialMatch[0] : '',
+    raw
+  };
+}
+
+function normalizeSerial(s: string): string {
+  return s.toUpperCase().replace(/\s+/g, ' ').trim();
+}
+
+function isValidSerial(s: string): boolean {
+  return SERIAL_REGEX.test(normalizeSerial(s));
+}
+
+// =====================================================================
+// Capture pipeline
+// =====================================================================
+
+function captureFullFrame(): { fullJpeg: string; thumbJpeg: string } | null {
+  if (video.videoWidth === 0) return null;
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+
+  const full = document.createElement('canvas');
+  full.width = w;
+  full.height = h;
+  const fctx = full.getContext('2d');
+  if (!fctx) return null;
+  fctx.drawImage(video, 0, 0, w, h);
+  const fullJpeg = full.toDataURL('image/jpeg', 0.9);
+
+  const thumbW = 320;
+  const thumbH = Math.round((h * thumbW) / w);
+  const thumb = document.createElement('canvas');
+  thumb.width = thumbW;
+  thumb.height = thumbH;
+  const tctx = thumb.getContext('2d');
+  if (!tctx) return null;
+  tctx.drawImage(full, 0, 0, thumbW, thumbH);
+  const thumbJpeg = thumb.toDataURL('image/jpeg', 0.7);
+
+  return { fullJpeg, thumbJpeg };
+}
+
+async function triggerCapture(): Promise<void> {
+  if (captureInFlight) return;
+  captureInFlight = true;
+  try {
+    const frames = captureFullFrame();
+    if (!frames) {
+      flashStatus('error', 'NO VIDEO', 'Camera is not ready yet.');
+      return;
+    }
+    playClick();
+    setStatus('ocr', 'OCR…', 'Sending frame to OpenRouter.');
+
+    if (!state.settings.apiKey) {
+      // No key — drop straight into review tray.
+      playBuzz();
+      addReviewItem({
+        id: crypto.randomUUID(),
+        thumbnailDataUrl: frames.thumbJpeg,
+        rawText: '(no API key configured — open Settings to add one)',
+        cardType: '',
+        serial: '',
+        capturedAt: Date.now()
+      });
+      flashStatus('review', 'REVIEW ⚠', 'Set an OpenRouter API key in Settings.');
+      return;
+    }
+
+    const start = performance.now();
+    try {
+      const result = await callOcr(frames.fullJpeg);
+      const ms = Math.round(performance.now() - start);
+      const conf = result.confidence != null ? result.confidence.toFixed(2) : 'n/a';
+      console.log(
+        `OCR ${ms}ms  conf=${conf}  type=${JSON.stringify(result.cardType)}  serial=${JSON.stringify(result.serial)}`
+      );
+
+      const normalized = normalizeSerial(result.serial);
+      if (isValidSerial(normalized)) {
+        playGood();
+        addCapturedRow({
+          id: crypto.randomUUID(),
+          cardType: result.cardType.trim(),
+          serial: normalized,
+          addedAt: Date.now()
+        });
+        const dup = state.captured.filter((r) => normalizeSerial(r.serial) === normalized).length > 1;
+        flashStatus(
+          dup ? 'review' : 'added',
+          dup ? 'DUPLICATE ⚠' : 'ADDED ✓',
+          `${ms}ms · ${dup ? 'serial already in list' : `${state.captured.length} captured`}`
+        );
+        if (dup) playBuzz();
+      } else {
+        playBuzz();
+        addReviewItem({
+          id: crypto.randomUUID(),
+          thumbnailDataUrl: frames.thumbJpeg,
+          rawText: result.raw,
+          cardType: result.cardType.trim(),
+          serial: result.serial.trim(),
+          capturedAt: Date.now()
+        });
+        flashStatus('review', 'REVIEW ⚠', `${ms}ms · serial didn't match expected format`);
+      }
+    } catch (err) {
+      console.error('OCR error', err);
+      playBuzz();
+      addReviewItem({
+        id: crypto.randomUUID(),
+        thumbnailDataUrl: frames.thumbJpeg,
+        rawText: `Error: ${(err as Error).message}`,
+        cardType: '',
+        serial: '',
+        capturedAt: Date.now()
+      });
+      flashStatus('error', 'OCR ERROR', (err as Error).message.slice(0, 80));
+    }
+  } finally {
+    captureInFlight = false;
+  }
+}
+
+// =====================================================================
+// Captured table
+// =====================================================================
+
+function addCapturedRow(row: CapturedRow): void {
   state.captured.push(row);
   saveState();
-  renderTable();
-  // Focus the new row's first input for fast manual entry in step 1.
-  const firstInput = capturedTbody.querySelector<HTMLInputElement>(
-    `tr[data-id="${row.id}"] input.card-type`
-  );
-  firstInput?.focus();
+  renderCaptured();
 }
 
-function deleteRow(id: string): void {
+function deleteCapturedRow(id: string): void {
   state.captured = state.captured.filter((r) => r.id !== id);
   saveState();
-  renderTable();
+  renderCaptured();
 }
 
-function updateRow(id: string, field: 'cardType' | 'serial', value: string): void {
+function updateCapturedRow(id: string, field: 'cardType' | 'serial', value: string): void {
   const row = state.captured.find((r) => r.id === id);
   if (!row) return;
   row[field] = value;
   saveState();
+  // Duplicate highlighting depends on serial — re-render for that case.
+  if (field === 'serial') renderCaptured();
 }
 
-function renderTable(): void {
+function renderCaptured(): void {
   capturedCount.textContent = String(state.captured.length);
   emptyState.style.display = state.captured.length === 0 ? 'block' : 'none';
   capturedTbody.innerHTML = '';
 
+  // Build serial -> count map for duplicate highlight
+  const counts = new Map<string, number>();
+  for (const r of state.captured) {
+    const k = normalizeSerial(r.serial);
+    if (!k) continue;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+
   for (const row of state.captured) {
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
+    const dup = counts.get(normalizeSerial(row.serial)) ?? 0;
+    if (dup > 1) tr.classList.add('duplicate');
 
     const tdType = document.createElement('td');
     const inputType = document.createElement('input');
@@ -198,7 +745,9 @@ function renderTable(): void {
     inputType.className = 'card-type';
     inputType.value = row.cardType;
     inputType.placeholder = 'Card type';
-    inputType.addEventListener('input', () => updateRow(row.id, 'cardType', inputType.value));
+    inputType.addEventListener('input', () =>
+      updateCapturedRow(row.id, 'cardType', inputType.value)
+    );
     tdType.appendChild(inputType);
 
     const tdSerial = document.createElement('td');
@@ -207,7 +756,9 @@ function renderTable(): void {
     inputSerial.className = 'serial';
     inputSerial.value = row.serial;
     inputSerial.placeholder = 'Serial';
-    inputSerial.addEventListener('input', () => updateRow(row.id, 'serial', inputSerial.value));
+    inputSerial.addEventListener('input', () =>
+      updateCapturedRow(row.id, 'serial', inputSerial.value)
+    );
     tdSerial.appendChild(inputSerial);
 
     const tdActions = document.createElement('td');
@@ -216,7 +767,7 @@ function renderTable(): void {
     delBtn.className = 'icon';
     delBtn.textContent = '✕';
     delBtn.title = 'Delete row';
-    delBtn.addEventListener('click', () => deleteRow(row.id));
+    delBtn.addEventListener('click', () => deleteCapturedRow(row.id));
     tdActions.appendChild(delBtn);
 
     tr.appendChild(tdType);
@@ -225,6 +776,135 @@ function renderTable(): void {
     capturedTbody.appendChild(tr);
   }
 }
+
+// =====================================================================
+// Review tray
+// =====================================================================
+
+let focusedReviewId: string | null = null;
+
+function addReviewItem(item: ReviewItem): void {
+  state.review.push(item);
+  saveState();
+  renderReview();
+}
+
+function discardReviewItem(id: string): void {
+  state.review = state.review.filter((r) => r.id !== id);
+  if (focusedReviewId === id) focusedReviewId = state.review[0]?.id ?? null;
+  saveState();
+  renderReview();
+}
+
+function confirmReviewItem(id: string): void {
+  const item = state.review.find((r) => r.id === id);
+  if (!item) return;
+  // Move into captured even if serial format isn't perfect — user has reviewed.
+  addCapturedRow({
+    id: crypto.randomUUID(),
+    cardType: item.cardType.trim(),
+    serial: normalizeSerial(item.serial),
+    addedAt: Date.now()
+  });
+  discardReviewItem(id);
+}
+
+function updateReviewItem(id: string, field: 'cardType' | 'serial', value: string): void {
+  const item = state.review.find((r) => r.id === id);
+  if (!item) return;
+  item[field] = value;
+  saveState();
+}
+
+function renderReview(): void {
+  reviewCount.textContent = String(state.review.length);
+  reviewSection.hidden = state.review.length === 0;
+  reviewBody.innerHTML = '';
+
+  if (state.review.length > 0 && focusedReviewId === null) {
+    focusedReviewId = state.review[0].id;
+  }
+
+  for (const item of state.review) {
+    const div = document.createElement('div');
+    div.className = 'review-item';
+    div.dataset.id = item.id;
+    if (item.id === focusedReviewId) div.classList.add('focused');
+
+    const img = document.createElement('img');
+    img.src = item.thumbnailDataUrl;
+    img.alt = '';
+
+    const fields = document.createElement('div');
+    fields.className = 'fields';
+
+    if (item.rawText) {
+      const raw = document.createElement('div');
+      raw.className = 'raw';
+      raw.textContent = item.rawText.slice(0, 600);
+      fields.appendChild(raw);
+    }
+
+    const typeInput = document.createElement('input');
+    typeInput.type = 'text';
+    typeInput.value = item.cardType;
+    typeInput.placeholder = 'Card type';
+    typeInput.addEventListener('input', () => updateReviewItem(item.id, 'cardType', typeInput.value));
+    fields.appendChild(typeInput);
+
+    const serialInput = document.createElement('input');
+    serialInput.type = 'text';
+    serialInput.value = item.serial;
+    serialInput.placeholder = 'Serial (8 hex byte pairs)';
+    serialInput.addEventListener('input', () => updateReviewItem(item.id, 'serial', serialInput.value));
+    fields.appendChild(serialInput);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = 'primary';
+    confirmBtn.textContent = 'Confirm';
+    confirmBtn.addEventListener('click', () => confirmReviewItem(item.id));
+    const discardBtn = document.createElement('button');
+    discardBtn.type = 'button';
+    discardBtn.textContent = 'Discard';
+    discardBtn.addEventListener('click', () => discardReviewItem(item.id));
+    actions.appendChild(confirmBtn);
+    actions.appendChild(discardBtn);
+
+    div.addEventListener('click', () => {
+      focusedReviewId = item.id;
+      // Lightweight: just toggle .focused on siblings without full re-render
+      reviewBody.querySelectorAll('.review-item').forEach((el) => el.classList.remove('focused'));
+      div.classList.add('focused');
+    });
+
+    div.appendChild(img);
+    div.appendChild(fields);
+    div.appendChild(actions);
+    reviewBody.appendChild(div);
+  }
+}
+
+function focusNextReview(delta: 1 | -1): void {
+  if (state.review.length === 0) return;
+  const idx = state.review.findIndex((r) => r.id === focusedReviewId);
+  const next = (idx + delta + state.review.length) % state.review.length;
+  focusedReviewId = state.review[next].id;
+  renderReview();
+  reviewBody.querySelector(`[data-id="${focusedReviewId}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+
+toggleReviewBtn.addEventListener('click', () => {
+  const collapsed = reviewSection.dataset.collapsed === 'true';
+  reviewSection.dataset.collapsed = collapsed ? 'false' : 'true';
+  toggleReviewBtn.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
+});
+
+// =====================================================================
+// Export
+// =====================================================================
 
 function csvField(s: string): string {
   if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
@@ -252,12 +932,14 @@ function buildTsv(): string {
 function timestampForFilename(): string {
   const d = new Date();
   const pad = (n: number) => n.toString().padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(
+    d.getHours()
+  )}${pad(d.getMinutes())}`;
 }
 
 downloadBtn.addEventListener('click', () => {
   if (state.captured.length === 0) {
-    flashStatus('NOTHING TO EXPORT');
+    flashStatus('idle', 'NOTHING TO EXPORT', DEFAULT_HINT);
     return;
   }
   const csv = buildCsv();
@@ -274,36 +956,189 @@ downloadBtn.addEventListener('click', () => {
 
 copyBtn.addEventListener('click', async () => {
   if (state.captured.length === 0) {
-    flashStatus('NOTHING TO COPY');
+    flashStatus('idle', 'NOTHING TO COPY', DEFAULT_HINT);
     return;
   }
   try {
     await navigator.clipboard.writeText(buildTsv());
-    flashStatus('COPIED');
+    flashStatus('added', 'COPIED', `${state.captured.length} rows on clipboard`);
   } catch (err) {
     console.error('Clipboard write failed', err);
-    flashStatus('COPY FAILED');
+    flashStatus('error', 'COPY FAILED', (err as Error).message);
   }
 });
 
 clearBtn.addEventListener('click', () => {
-  if (state.captured.length === 0) return;
-  if (!confirm(`Clear all ${state.captured.length} captured rows?`)) return;
+  if (state.captured.length === 0 && state.review.length === 0) return;
+  if (!confirm(`Clear all ${state.captured.length} captured rows and ${state.review.length} review items?`)) return;
   state.captured = [];
+  state.review = [];
+  focusedReviewId = null;
   saveState();
-  renderTable();
+  renderCaptured();
+  renderReview();
 });
 
-snapBtn.addEventListener('click', captureFrame);
+// =====================================================================
+// Settings dialog
+// =====================================================================
+
+function syncSettingsToInputs(): void {
+  apiKeyInput.value = state.settings.apiKey;
+  modelInput.value = state.settings.model;
+  mutedInput.checked = state.settings.muted;
+  autoCaptureSettingInput.checked = state.settings.autoCapture;
+  autoCaptureToggle.checked = state.settings.autoCapture;
+
+  for (const k of Object.keys(thresholdInputs) as Array<keyof Thresholds>) {
+    const input = thresholdInputs[k];
+    const out = thresholdOutputs[k];
+    input.value = String(state.settings.thresholds[k]);
+    out.value = String(state.settings.thresholds[k]);
+  }
+}
+
+function openSettings(): void {
+  syncSettingsToInputs();
+  if (!settingsDialog.open) settingsDialog.showModal();
+}
+
+settingsBtn.addEventListener('click', openSettings);
+closeSettingsBtn.addEventListener('click', () => settingsDialog.close());
+doneSettingsBtn.addEventListener('click', () => settingsDialog.close());
+
+apiKeyInput.addEventListener('change', () => {
+  state.settings.apiKey = apiKeyInput.value.trim();
+  saveState();
+});
+modelInput.addEventListener('change', () => {
+  state.settings.model = modelInput.value.trim() || DEFAULT_MODEL;
+  saveState();
+});
+mutedInput.addEventListener('change', () => {
+  state.settings.muted = mutedInput.checked;
+  saveState();
+});
+autoCaptureSettingInput.addEventListener('change', () => {
+  state.settings.autoCapture = autoCaptureSettingInput.checked;
+  autoCaptureToggle.checked = state.settings.autoCapture;
+  saveState();
+});
+
+for (const k of Object.keys(thresholdInputs) as Array<keyof Thresholds>) {
+  const input = thresholdInputs[k];
+  const out = thresholdOutputs[k];
+  input.addEventListener('input', () => {
+    const v = Number(input.value);
+    state.settings.thresholds[k] = v;
+    out.value = String(v);
+    saveState();
+  });
+}
+
+resetThresholdsBtn.addEventListener('click', () => {
+  state.settings.thresholds = { ...DEFAULT_THRESHOLDS };
+  saveState();
+  syncSettingsToInputs();
+});
+
+testCaptureBtn.addEventListener('click', () => {
+  settingsDialog.close();
+  void triggerCapture();
+});
+
+// Backdrop click closes the dialog
+settingsDialog.addEventListener('click', (e) => {
+  if (e.target === settingsDialog) settingsDialog.close();
+});
+
+// =====================================================================
+// Top-level controls
+// =====================================================================
+
+autoCaptureToggle.addEventListener('change', () => {
+  state.settings.autoCapture = autoCaptureToggle.checked;
+  autoCaptureSettingInput.checked = state.settings.autoCapture;
+  saveState();
+});
+
+snapBtn.addEventListener('click', () => {
+  void triggerCapture();
+});
+
+// =====================================================================
+// Keyboard shortcuts
+// =====================================================================
 
 window.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement | null;
-  const isTyping = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
-  if (e.code === 'Space' && !isTyping) {
+  const isTyping =
+    target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+
+  if (e.code === 'Escape') {
+    if (settingsDialog.open) {
+      // <dialog> handles Esc natively, but keep behavior consistent.
+      return;
+    }
+    if (state.review.length > 0) {
+      reviewSection.dataset.collapsed = 'true';
+      toggleReviewBtn.setAttribute('aria-expanded', 'false');
+    }
+    return;
+  }
+
+  if (isTyping) return;
+
+  if (e.code === 'Space') {
     e.preventDefault();
-    captureFrame();
+    void triggerCapture();
+    return;
+  }
+
+  if (e.key === 'u' || e.key === 'U') {
+    e.preventDefault();
+    if (state.captured.length === 0) return;
+    state.captured.pop();
+    saveState();
+    renderCaptured();
+    flashStatus('idle', 'UNDONE', `${state.captured.length} captured`);
+    return;
+  }
+
+  if (e.key === 'j' || e.key === 'J') {
+    e.preventDefault();
+    focusNextReview(1);
+    return;
+  }
+  if (e.key === 'k' || e.key === 'K') {
+    e.preventDefault();
+    focusNextReview(-1);
+    return;
+  }
+  if (e.key === 'Enter') {
+    if (focusedReviewId) {
+      e.preventDefault();
+      confirmReviewItem(focusedReviewId);
+    }
+    return;
+  }
+  if (e.key === 'd' || e.key === 'D') {
+    if (focusedReviewId) {
+      e.preventDefault();
+      discardReviewItem(focusedReviewId);
+    }
+    return;
   }
 });
 
-renderTable();
-initCamera();
+// =====================================================================
+// Boot
+// =====================================================================
+
+autoCaptureToggle.checked = state.settings.autoCapture;
+syncSettingsToInputs();
+renderCaptured();
+renderReview();
+setStatus('idle', 'WAITING FOR CARD', DEFAULT_HINT);
+void initCamera();
+detectorLoop();

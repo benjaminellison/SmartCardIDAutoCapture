@@ -8,15 +8,42 @@
   <body>
     <header>
       <h1>Smart Card Disposal Logger</h1>
+      <div class="header-actions">
+        <button id="settingsBtn" type="button">⚙ Settings</button>
+      </div>
     </header>
+
+    <details class="how-to">
+      <summary>How to use</summary>
+      <div class="how-to-body">
+        <p>Hold a stack of cards in front of the webcam, back of the top card facing the lens. The detector waits for a still, sharp white card and snaps automatically. Peel the top card off — that motion re-arms the detector. Repeat.</p>
+        <ul>
+          <li><strong>Space</strong> — force capture the current frame</li>
+          <li><strong>U</strong> — undo last add</li>
+          <li><strong>J / K</strong> — next / previous review item</li>
+          <li><strong>Enter</strong> — confirm focused review item</li>
+          <li><strong>D</strong> — discard focused review item</li>
+          <li><strong>Esc</strong> — close settings / collapse review</li>
+        </ul>
+        <p>Set your OpenRouter API key in Settings, or via <code>.env.local</code>. Bad reads land in the review tray below; physically set those cards aside and clean up at the end.</p>
+      </div>
+    </details>
+
     <main>
       <section class="capture">
-        <div class="status" id="status" role="status" aria-live="polite">WAITING FOR CARD</div>
-        <video id="video" autoplay playsinline muted></video>
+        <div class="status idle" id="status" role="status" aria-live="polite">WAITING FOR CARD</div>
+        <div class="video-wrap">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="roi-overlay" id="roiOverlay" aria-hidden="true"></div>
+        </div>
         <div class="controls">
           <label>
             Camera:
             <select id="cameraSelect"></select>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="autoCaptureToggle" />
+            Auto-capture
           </label>
           <button id="snapBtn" type="button">Snap (Space)</button>
         </div>
@@ -45,6 +72,77 @@
         <p class="empty-state" id="emptyState">No captures yet. Press Space (or click Snap) to add a row.</p>
       </section>
     </main>
+
+    <section class="review" id="reviewSection" hidden>
+      <div class="review-header">
+        <button id="toggleReviewBtn" type="button" aria-expanded="true">
+          <span class="caret">▾</span>
+          Needs review (<span id="reviewCount">0</span>)
+        </button>
+      </div>
+      <div class="review-body" id="reviewBody"></div>
+    </section>
+
+    <dialog id="settingsDialog" class="settings-dialog">
+      <form method="dialog" id="settingsForm">
+        <div class="dialog-head">
+          <h2>Settings</h2>
+          <button type="button" id="closeSettingsBtn" class="icon" aria-label="Close">✕</button>
+        </div>
+
+        <label>OpenRouter API key
+          <input type="password" id="apiKeyInput" autocomplete="off" spellcheck="false" />
+          <small>Stored in localStorage on this machine. Loaded from <code>VITE_OPENROUTER_API_KEY</code> if blank.</small>
+        </label>
+
+        <label>Model
+          <input type="text" id="modelInput" spellcheck="false" />
+        </label>
+
+        <div class="checkbox-row">
+          <label class="toggle">
+            <input type="checkbox" id="mutedInput" />
+            Mute audio
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="autoCaptureSettingInput" />
+            Auto-capture enabled
+          </label>
+        </div>
+
+        <fieldset class="thresholds">
+          <legend>Detector thresholds</legend>
+          <label>
+            <span>White brightness <output id="whiteBrightnessOut"></output></span>
+            <input type="range" id="whiteBrightnessInput" min="100" max="240" step="1" />
+          </label>
+          <label>
+            <span>Color variance (max) <output id="whiteColorVarianceOut"></output></span>
+            <input type="range" id="whiteColorVarianceInput" min="5" max="80" step="1" />
+          </label>
+          <label>
+            <span>Motion delta (max) <output id="motionDeltaOut"></output></span>
+            <input type="range" id="motionDeltaInput" min="1" max="40" step="1" />
+          </label>
+          <label>
+            <span>Sharpness (min) <output id="sharpnessMinOut"></output></span>
+            <input type="range" id="sharpnessMinInput" min="5" max="400" step="1" />
+          </label>
+          <label>
+            <span>Stability window (ms) <output id="stabilityMsOut"></output></span>
+            <input type="range" id="stabilityMsInput" min="100" max="1500" step="50" />
+          </label>
+          <p class="metrics" id="liveMetrics">Live metrics: —</p>
+        </fieldset>
+
+        <div class="dialog-actions">
+          <button type="button" id="testCaptureBtn">Test capture</button>
+          <button type="button" id="resetThresholdsBtn">Reset thresholds</button>
+          <button type="button" id="doneSettingsBtn" class="primary">Done</button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="/src/app.ts"></script>
   </body>
 </html>
