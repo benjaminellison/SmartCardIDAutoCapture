@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Card Disposal Logger</title>
+  </head>
+  <body>
+    <header>
+      <h1>Smart Card Disposal Logger</h1>
+    </header>
+    <main>
+      <section class="capture">
+        <div class="status" id="status" role="status" aria-live="polite">WAITING FOR CARD</div>
+        <video id="video" autoplay playsinline muted></video>
+        <div class="controls">
+          <label>
+            Camera:
+            <select id="cameraSelect"></select>
+          </label>
+          <button id="snapBtn" type="button">Snap (Space)</button>
+        </div>
+        <p class="hint" id="hint">Press Space to capture the current frame.</p>
+      </section>
+
+      <section class="captured">
+        <div class="captured-header">
+          <h2>Captured (<span id="capturedCount">0</span>)</h2>
+          <div class="actions">
+            <button id="downloadBtn" type="button">Download CSV</button>
+            <button id="copyBtn" type="button">Copy</button>
+            <button id="clearBtn" type="button">Clear all</button>
+          </div>
+        </div>
+        <table id="capturedTable">
+          <thead>
+            <tr>
+              <th>Card type</th>
+              <th>Serial</th>
+              <th aria-label="Actions"></th>
+            </tr>
+          </thead>
+          <tbody id="capturedTbody"></tbody>
+        </table>
+        <p class="empty-state" id="emptyState">No captures yet. Press Space (or click Snap) to add a row.</p>
+      </section>
+    </main>
+    <script type="module" src="/src/app.ts"></script>
+  </body>
+</html>
