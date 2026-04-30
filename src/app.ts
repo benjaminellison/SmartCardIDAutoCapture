@@ -158,6 +158,8 @@ const statusEl = $<HTMLDivElement>('status');
 const hintEl = $<HTMLParagraphElement>('hint');
 const roiOverlay = $<HTMLDivElement>('roiOverlay');
 const metricsInline = $<HTMLParagraphElement>('metricsInline');
+const metricsRow = $<HTMLDivElement>('metricsRow');
+const tuneBtn = $<HTMLButtonElement>('tuneBtn');
 const capturedCount = $<HTMLSpanElement>('capturedCount');
 const capturedTbody = $<HTMLTableSectionElement>('capturedTbody');
 const emptyState = $<HTMLParagraphElement>('emptyState');
@@ -379,6 +381,7 @@ let detectorState: 'NO_CARD' | 'CARD_MOVING' | 'COOLDOWN' = 'NO_CARD';
 let stableSince = 0;
 let lastDetectorTick = 0;
 let captureInFlight = false;
+let latestMetrics: Metrics | null = null;
 
 type Metrics = { brightness: number; colorVariance: number; motion: number; sharpness: number };
 
@@ -453,6 +456,7 @@ function detectorLoop(): void {
 
   const m = computeMetrics();
   if (!m) return;
+  latestMetrics = m;
 
   // Live metrics in settings dialog
   if (settingsDialog.open) {
@@ -464,7 +468,7 @@ function detectorLoop(): void {
 
   if (!state.settings.autoCapture) {
     roiOverlay.className = 'roi-overlay hidden';
-    metricsInline.hidden = true;
+    metricsRow.hidden = true;
     return;
   }
   roiOverlay.className = 'roi-overlay';
@@ -475,7 +479,7 @@ function detectorLoop(): void {
   const isSharp = m.sharpness > t.sharpnessMin;
 
   // Always-visible live metrics for tuning
-  metricsInline.hidden = false;
+  metricsRow.hidden = false;
   const fmt = (val: number, ok: boolean) =>
     `<span class="${ok ? 'ok' : 'bad'}">${val.toFixed(0)}</span>`;
   metricsInline.innerHTML =
@@ -1181,6 +1185,38 @@ resetThresholdsBtn.addEventListener('click', () => {
   state.settings.thresholds = { ...DEFAULT_THRESHOLDS };
   saveState();
   syncSettingsToInputs();
+});
+
+function clampToInput(value: number, input: HTMLInputElement): number {
+  const min = Number(input.min || '0');
+  const max = Number(input.max || '9999');
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+tuneBtn.addEventListener('click', () => {
+  const m = latestMetrics;
+  if (!m) {
+    flashStatus('idle', 'NO READING', 'Wait a moment for live metrics, then try again.');
+    return;
+  }
+  // Snapshot the current readings into thresholds with margins so this same
+  // view still passes plus a bit of slack: dim the brightness floor, raise the
+  // color-variance ceiling, allow some extra motion, accept slightly less sharp.
+  state.settings.thresholds = {
+    ...state.settings.thresholds,
+    whiteBrightness: clampToInput(m.brightness - 10, thresholdInputs.whiteBrightness),
+    whiteColorVariance: clampToInput(Math.max(m.colorVariance + 15, m.colorVariance * 1.4), thresholdInputs.whiteColorVariance),
+    motionDelta: clampToInput(m.motion + 4, thresholdInputs.motionDelta),
+    sharpnessMin: clampToInput(m.sharpness * 0.75, thresholdInputs.sharpnessMin)
+  };
+  saveState();
+  syncSettingsToInputs();
+  const t = state.settings.thresholds;
+  flashStatus(
+    'added',
+    'TUNED',
+    `bright>${t.whiteBrightness} cvar<${t.whiteColorVariance} motion<${t.motionDelta} sharp>${t.sharpnessMin}`
+  );
 });
 
 serialFormatInput.addEventListener('change', () => {

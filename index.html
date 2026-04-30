@@ -49,7 +49,10 @@
           <button id="snapBtn" type="button">Snap (Space)</button>
         </div>
         <p class="hint" id="hint">Press Space to capture the current frame.</p>
-        <p class="metrics-inline" id="metricsInline" hidden></p>
+        <div class="metrics-row" id="metricsRow" hidden>
+          <p class="metrics-inline" id="metricsInline"></p>
+          <button type="button" id="tuneBtn" class="tune" title="Set the four detector thresholds from the current readings">Tune to current</button>
+        </div>
       </section>
 
       <section class="captured">

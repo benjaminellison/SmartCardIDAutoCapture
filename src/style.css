@@ -146,10 +146,25 @@ video {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
   font-size: 0.78rem;
   color: var(--muted);
+  flex: 1;
+  min-width: 0;
 }
 
 .metrics-inline .ok { color: var(--good); }
 .metrics-inline .bad { color: var(--bad); }
+
+.metrics-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.metrics-row button.tune {
+  padding: 0.25rem 0.7rem;
+  font-size: 0.78rem;
+  flex: 0 0 auto;
+}
 
 .captured-header {
   display: flex;
