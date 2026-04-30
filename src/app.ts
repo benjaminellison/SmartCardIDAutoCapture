@@ -1144,7 +1144,7 @@ settingsBtn.addEventListener('click', openSettings);
 closeSettingsBtn.addEventListener('click', () => settingsDialog.close());
 doneSettingsBtn.addEventListener('click', () => settingsDialog.close());
 
-apiKeyInput.addEventListener('change', () => {
+apiKeyInput.addEventListener('input', () => {
   state.settings.apiKey = apiKeyInput.value.trim();
   saveState();
 });
@@ -1156,7 +1156,7 @@ apiKeyToggleBtn.addEventListener('click', () => {
   apiKeyToggleBtn.setAttribute('aria-pressed', showing ? 'false' : 'true');
   apiKeyToggleBtn.setAttribute('aria-label', showing ? 'Show API key' : 'Hide API key');
 });
-modelInput.addEventListener('change', () => {
+modelInput.addEventListener('input', () => {
   state.settings.model = modelInput.value.trim() || DEFAULT_MODEL;
   saveState();
 });
@@ -1224,11 +1224,11 @@ serialFormatInput.addEventListener('change', () => {
   saveState();
   syncCustomSerialVisibility();
 });
-customSerialRegexInput.addEventListener('change', () => {
+customSerialRegexInput.addEventListener('input', () => {
   state.settings.customSerialRegex = customSerialRegexInput.value.trim();
   saveState();
 });
-customSerialHintInput.addEventListener('change', () => {
+customSerialHintInput.addEventListener('input', () => {
   state.settings.customSerialHint = customSerialHintInput.value.trim();
   saveState();
 });
