@@ -243,6 +243,17 @@ select, input[type="text"], input[type="password"] {
   width: 100%;
 }
 
+select {
+  color-scheme: light dark;
+  background-color: Canvas;
+  color: CanvasText;
+}
+
+option {
+  background-color: Canvas;
+  color: CanvasText;
+}
+
 input[type="text"]:focus, input[type="password"]:focus, select:focus {
   outline: none;
   border-color: var(--accent);
