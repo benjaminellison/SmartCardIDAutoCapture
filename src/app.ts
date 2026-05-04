@@ -1051,7 +1051,7 @@ function buildTsv(): string {
     const s = r.serial.replace(/\t/g, ' ');
     lines.push(`${t}\t${s}`);
   }
-  return lines.join('\n');
+  return lines.join('\r\n');
 }
 
 function timestampForFilename(): string {
