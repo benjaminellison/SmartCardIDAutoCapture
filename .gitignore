@@ -6,3 +6,6 @@ dist
 .env
 .env.local
 .claude/settings.local.json
+
+# Local reference material — not part of the app
+*.docx
