@@ -4,9 +4,19 @@ import './style.css';
 // Types
 // =====================================================================
 
+type KnownCardTypeId =
+  | 'gd-fips-201-sce-v7'
+  | 'gd-fips-201-sce-v3-2'
+  | 'safenet-sc650'
+  | 'gemalto-idprime-md'
+  | 'idemia-id-one-piv'
+  | 'unknown';
+
 type CapturedRow = {
   id: string;
-  cardType: string;
+  cardTypeId: KnownCardTypeId;
+  cardDescription: string;
+  version: string;
   serial: string;
   addedAt: number;
 };
@@ -15,7 +25,9 @@ type ReviewItem = {
   id: string;
   thumbnailDataUrl: string;
   rawText: string;
-  cardType: string;
+  cardTypeId: KnownCardTypeId;
+  cardDescription: string;
+  version: string;
   serial: string;
   capturedAt: number;
 };
@@ -28,8 +40,6 @@ type Thresholds = {
   stabilityMs: number;
 };
 
-type SerialFormat = 'hex8' | 'decimal' | 'either' | 'custom';
-
 type Settings = {
   selectedCameraId?: string;
   apiKey: string;
@@ -37,9 +47,7 @@ type Settings = {
   muted: boolean;
   autoCapture: boolean;
   thresholds: Thresholds;
-  serialFormat: SerialFormat;
-  customSerialRegex: string;
-  customSerialHint: string;
+  customPrompt: string;
   minConfidence: number;
 };
 
@@ -50,7 +58,9 @@ type State = {
 };
 
 type OcrResult = {
-  cardType: string;
+  cardTypeId: KnownCardTypeId;
+  cardDescription: string;
+  version: string;
   serial: string;
   confidence?: number;
   raw: string;
@@ -81,10 +91,74 @@ const ROI_W = Math.floor(DETECTOR_W * 0.6);
 const ROI_H = Math.floor(DETECTOR_H * 0.6);
 const DETECTOR_INTERVAL_MS = 100; // ~10fps
 
-const HEX8_REGEX = /^([0-9A-F]{2} ){7}[0-9A-F]{2}$/;
-const DECIMAL_REGEX = /^[0-9]{6,}$/;
-
 const DEFAULT_HINT = 'Ready. Hold a card up or press Space to force a capture.';
+
+const KNOWN_CARD_TYPE_IDS: readonly KnownCardTypeId[] = [
+  'gd-fips-201-sce-v7',
+  'gd-fips-201-sce-v3-2',
+  'safenet-sc650',
+  'gemalto-idprime-md',
+  'idemia-id-one-piv',
+  'unknown'
+];
+
+// Per-card-type serial validators. Loose enough to not reject minor printing
+// variations but strict enough to catch hallucinations and partial reads.
+const CARD_VALIDATORS: Record<KnownCardTypeId, (serial: string) => boolean> = {
+  'gd-fips-201-sce-v7': (s) => /^[0-9A-Z]{6,10}$/.test(s.toUpperCase()),
+  'gd-fips-201-sce-v3-2': (s) => /\s\/\s/.test(s) && s.length >= 10,
+  'safenet-sc650': (s) => /^[0-9A-F]{4}(-[0-9A-F]{4}){4}$/.test(s.toUpperCase()),
+  'gemalto-idprime-md': (s) => /^([0-9A-F]{2} ){7}[0-9A-F]{2}$/.test(s.toUpperCase()),
+  'idemia-id-one-piv': (s) => /^[0-9A-Z]+(-[0-9A-Z]+){1,4}$/.test(s.toUpperCase()),
+  'unknown': () => false // unknown always routes to review for manual handling
+};
+
+const DEFAULT_PROMPT = `You are reading the back of a U.S. Department of State PKI smart card. Identify which of the known card types below this is, then extract the description, version, and serial number using that card type's specific rules.
+
+KNOWN CARD TYPES:
+
+1. id "gd-fips-201-sce-v7" — G+D FIPS 201 SCE v7.0
+   • Description (top-left): "G+D FIPS 201 SCE"
+   • Version: "7.0"
+   • Serial (top-right): 6–10 alphanumeric characters
+   • No manufacture date
+
+2. id "gd-fips-201-sce-v3-2" — Older G+D FIPS 201 SCE v3.2
+   • Description (top-left): "G+D FIPS 201 SCE" OR "G&D FIPS 201 SCE" — preserve the "&" or "+" exactly as printed
+   • Version: "3.2"
+   • Serial: TWO serial numbers printed on this card. The first is long with dashes (e.g. XXXX-XXXX-XXXX-XXXX-XXXXX). The second is shorter (around 8 chars). Output BOTH joined by " / " on a single line, e.g. "AAAA-BBBB-CCCC-DDDD-EEEEE / FFFFFFFF". Long-with-dashes serial first, short serial second.
+
+3. id "safenet-sc650" — SafeNet AT SC650 (and older variants)
+   • Description (bottom-left): "SafeNet AT SC650" — older variants may omit the "AT" and read just "SafeNet SC650". Preserve exactly as printed.
+   • Version: e.g. "v4.2k", "v4.1", older "v2.01"
+   • Serial: 20 hex digits with dashes preserved, format XXXX-XXXX-XXXX-XXXX-XXXX (uppercase)
+   • Some older cards have a hashed-out line of "#" characters BELOW the real text at the very bottom of the card. IGNORE that hashed line — it is not part of any field.
+
+4. id "gemalto-idprime-md" — Gemalto IDPrime MD SNAP
+   • Description (top-left): "Gemalto IDPrime MD" — IMPORTANT: always preserve the "Gemalto" prefix. Do NOT shorten the description to just "IDPrime MD" even if "Gemalto" is faint or partially obscured.
+   • Version: if "RevB" appears next to the description, output "RevB". If no version is printed at all, output "1.0".
+   • Serial (top-right): 16 hex characters formatted as 8 byte pairs separated by single spaces, uppercase, e.g. "12 34 AB CD 56 78 EF 90"
+   • No manufacture date.
+
+5. id "idemia-id-one-piv" — IDEMIA ID-One PIV
+   • Description (top-left): "ID-One PIV ... from IDEMIA" — preserve the full phrase as printed
+   • Version: appears immediately after "ID-One PIV" and before "(P/N", e.g. "2.4"
+   • Serial (top-right, far right): hyphenated alphanumeric string like XXXXXX-XXXX-XXXXXXXXXX
+   • CRITICAL WARNING: these cards print a "P/N nnnnnnn" part number INSIDE the description area. The P/N is NOT the serial number. Do not confuse them. The serial is in the top-right corner; the P/N is part of the description.
+   • No manufacture date.
+
+If the card does not match any of the above, set "card_type_id" to "unknown" and extract whatever description/version/serial you can read.
+
+OUTPUT FORMAT — return ONLY this JSON object, no commentary, no markdown, no code fences:
+{
+  "card_type_id": "gd-fips-201-sce-v7" | "gd-fips-201-sce-v3-2" | "safenet-sc650" | "gemalto-idprime-md" | "idemia-id-one-piv" | "unknown",
+  "card_description": "...",
+  "version": "...",
+  "serial": "...",
+  "confidence": 0.0
+}
+
+"confidence" is your confidence in the SERIAL reading, 0 to 1. Use < 0.5 if any character is ambiguous. Read carefully — etched text is small. Output the serial EXACTLY as printed; do not guess characters.`;
 
 // =====================================================================
 // State
@@ -100,9 +174,7 @@ function defaultState(): State {
       muted: false,
       autoCapture: true,
       thresholds: { ...DEFAULT_THRESHOLDS },
-      serialFormat: 'hex8',
-      customSerialRegex: '',
-      customSerialHint: '',
+      customPrompt: DEFAULT_PROMPT,
       minConfidence: DEFAULT_MIN_CONFIDENCE
     }
   };
@@ -114,14 +186,37 @@ function loadState(): State {
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw) as Partial<State>;
     const def = defaultState();
+    // Migrate older rows that only had cardType/serial — they pre-date this
+    // schema change. Map cardType -> cardDescription, default version + cardTypeId.
+    type LegacyCaptured = Partial<CapturedRow> & { cardType?: string };
+    type LegacyReview = Partial<ReviewItem> & { cardType?: string };
+    const captured: CapturedRow[] = (parsed.captured ?? []).map((r: LegacyCaptured): CapturedRow => ({
+      id: r.id ?? crypto.randomUUID(),
+      cardTypeId: r.cardTypeId ?? 'unknown',
+      cardDescription: r.cardDescription ?? r.cardType ?? '',
+      version: r.version ?? '',
+      serial: r.serial ?? '',
+      addedAt: r.addedAt ?? Date.now()
+    }));
+    const review: ReviewItem[] = (parsed.review ?? []).map((r: LegacyReview): ReviewItem => ({
+      id: r.id ?? crypto.randomUUID(),
+      thumbnailDataUrl: r.thumbnailDataUrl ?? '',
+      rawText: r.rawText ?? '',
+      cardTypeId: r.cardTypeId ?? 'unknown',
+      cardDescription: r.cardDescription ?? r.cardType ?? '',
+      version: r.version ?? '',
+      serial: r.serial ?? '',
+      capturedAt: r.capturedAt ?? Date.now()
+    }));
     return {
-      captured: parsed.captured ?? [],
-      review: parsed.review ?? [],
+      captured,
+      review,
       settings: {
         ...def.settings,
         ...(parsed.settings ?? {}),
         apiKey: parsed.settings?.apiKey || def.settings.apiKey,
         model: parsed.settings?.model || def.settings.model,
+        customPrompt: parsed.settings?.customPrompt || def.settings.customPrompt,
         thresholds: {
           ...def.settings.thresholds,
           ...(parsed.settings?.thresholds ?? {})
@@ -185,9 +280,8 @@ const autoCaptureSettingInput = $<HTMLInputElement>('autoCaptureSettingInput');
 const testCaptureBtn = $<HTMLButtonElement>('testCaptureBtn');
 const resetThresholdsBtn = $<HTMLButtonElement>('resetThresholdsBtn');
 const liveMetrics = $<HTMLParagraphElement>('liveMetrics');
-const serialFormatInput = $<HTMLSelectElement>('serialFormatInput');
-const customSerialRegexInput = $<HTMLInputElement>('customSerialRegexInput');
-const customSerialHintInput = $<HTMLInputElement>('customSerialHintInput');
+const customPromptInput = $<HTMLTextAreaElement>('customPromptInput');
+const resetPromptBtn = $<HTMLButtonElement>('resetPromptBtn');
 const minConfidenceInput = $<HTMLInputElement>('minConfidenceInput');
 const minConfidenceOut = $<HTMLOutputElement>('minConfidenceOut');
 
@@ -532,34 +626,40 @@ function detectorLoop(): void {
 // OCR (OpenRouter)
 // =====================================================================
 
-function buildOcrPrompt(): string {
-  let serialLine: string;
-  switch (state.settings.serialFormat) {
-    case 'hex8':
-      serialLine =
-        '- "serial": the printed serial as 8 hex byte pairs separated by single spaces, uppercase (e.g. "12 34 AB CD 56 78 EF 90")';
-      break;
-    case 'decimal':
-      serialLine =
-        '- "serial": the printed numeric serial number, digits only with no separators (e.g. "1234567890123")';
-      break;
-    case 'either':
-      serialLine =
-        '- "serial": the printed serial. If hex, format as 8 byte pairs separated by single spaces uppercase (e.g. "12 34 AB CD 56 78 EF 90"). If numeric, digits only with no separators.';
-      break;
-    case 'custom':
-      serialLine = `- "serial": the printed serial. ${state.settings.customSerialHint || 'Use the exact format printed on the card.'}`;
-      break;
+function effectivePrompt(): string {
+  return state.settings.customPrompt || DEFAULT_PROMPT;
+}
+
+function isKnownCardTypeId(s: unknown): s is KnownCardTypeId {
+  return typeof s === 'string' && (KNOWN_CARD_TYPE_IDS as readonly string[]).includes(s);
+}
+
+// Normalize a serial per its card type's expected format. For card types where
+// the canonical form is uppercase hex, uppercase. For others, just collapse
+// whitespace and trim.
+function normalizeSerial(s: string, cardTypeId: KnownCardTypeId): string {
+  const trimmed = s.replace(/\s+/g, ' ').trim();
+  switch (cardTypeId) {
+    case 'safenet-sc650':
+    case 'gemalto-idprime-md':
+    case 'idemia-id-one-piv':
+    case 'gd-fips-201-sce-v7':
+      return trimmed.toUpperCase();
+    case 'gd-fips-201-sce-v3-2':
+      // Two serials joined by " / "; normalize each side's whitespace + uppercase
+      return trimmed
+        .split('/')
+        .map((part) => part.trim().toUpperCase())
+        .join(' / ');
+    case 'unknown':
+    default:
+      return trimmed;
   }
+}
 
-  return `You are reading the back of a smart card. Extract:
-- "card_type": short identifier (manufacturer or model name as printed)
-${serialLine}
-- "confidence": number 0-1 reflecting how confident you are in the serial. Use < 0.5 if you cannot read every character with certainty.
-
-Read carefully — small etched text on a white card. Output the serial EXACTLY as printed; do not guess characters or invent text. If a character is ambiguous, lower the confidence rather than guessing.
-
-Output ONLY a JSON object with exactly those three fields. No commentary, no markdown, no code fences.`;
+function isValidSerial(s: string, cardTypeId: KnownCardTypeId): boolean {
+  if (!s) return false;
+  return CARD_VALIDATORS[cardTypeId](s);
 }
 
 async function callOcr(imageDataUrl: string): Promise<OcrResult> {
@@ -597,7 +697,7 @@ async function callOcrOnce(imageDataUrl: string): Promise<OcrResult> {
         {
           role: 'user',
           content: [
-            { type: 'text', text: buildOcrPrompt() },
+            { type: 'text', text: effectivePrompt() },
             { type: 'image_url', image_url: { url: imageDataUrl } }
           ]
         }
@@ -625,8 +725,11 @@ function parseOcrResponse(content: string): OcrResult {
   const tryParse = (s: string): OcrResult | null => {
     try {
       const obj = JSON.parse(s) as Record<string, unknown>;
+      const id = obj.card_type_id ?? obj.cardTypeId;
       return {
-        cardType: String(obj.card_type ?? obj.cardType ?? '').trim(),
+        cardTypeId: isKnownCardTypeId(id) ? id : 'unknown',
+        cardDescription: String(obj.card_description ?? obj.cardDescription ?? obj.card_type ?? '').trim(),
+        version: String(obj.version ?? '').trim(),
         serial: String(obj.serial ?? '').trim(),
         confidence:
           typeof obj.confidence === 'number' ? obj.confidence : undefined,
@@ -646,36 +749,15 @@ function parseOcrResponse(content: string): OcrResult {
     if (obj) return obj;
   }
 
-  // Fallback: regex out a hex serial from raw text
-  const serialMatch = raw.match(/(?:[0-9A-Fa-f]{2}\s+){7}[0-9A-Fa-f]{2}/);
+  // Fallback: couldn't parse JSON at all. Return raw payload so the user can
+  // see what came back in the review tray.
   return {
-    cardType: '',
-    serial: serialMatch ? serialMatch[0] : '',
+    cardTypeId: 'unknown',
+    cardDescription: '',
+    version: '',
+    serial: '',
     raw
   };
-}
-
-function normalizeSerial(s: string): string {
-  return s.toUpperCase().replace(/\s+/g, ' ').trim();
-}
-
-function isValidSerial(s: string): boolean {
-  const norm = normalizeSerial(s);
-  if (!norm) return false;
-  switch (state.settings.serialFormat) {
-    case 'hex8':
-      return HEX8_REGEX.test(norm);
-    case 'decimal':
-      return DECIMAL_REGEX.test(norm);
-    case 'either':
-      return HEX8_REGEX.test(norm) || DECIMAL_REGEX.test(norm);
-    case 'custom':
-      try {
-        return new RegExp(state.settings.customSerialRegex).test(norm);
-      } catch {
-        return false;
-      }
-  }
 }
 
 // =====================================================================
@@ -749,7 +831,9 @@ async function triggerCapture(): Promise<void> {
         id: crypto.randomUUID(),
         thumbnailDataUrl: frames.thumbJpeg,
         rawText: '(no API key configured — open Settings to add one)',
-        cardType: '',
+        cardTypeId: 'unknown',
+        cardDescription: '',
+        version: '',
         serial: '',
         capturedAt: Date.now()
       });
@@ -764,11 +848,12 @@ async function triggerCapture(): Promise<void> {
       const conf = result.confidence != null ? result.confidence.toFixed(2) : 'n/a';
       console.log(
         `OCR ${ms}ms  conf=${conf}  fullSharp=${frames.fullSharpness.toFixed(0)}  ` +
-          `type=${JSON.stringify(result.cardType)}  serial=${JSON.stringify(result.serial)}`
+          `cardType=${result.cardTypeId}  desc=${JSON.stringify(result.cardDescription)}  ` +
+          `ver=${JSON.stringify(result.version)}  serial=${JSON.stringify(result.serial)}`
       );
 
-      const normalized = normalizeSerial(result.serial);
-      const formatOk = isValidSerial(normalized);
+      const normalized = normalizeSerial(result.serial, result.cardTypeId);
+      const formatOk = isValidSerial(normalized, result.cardTypeId);
       const confOk =
         result.confidence == null || result.confidence >= state.settings.minConfidence;
 
@@ -776,27 +861,37 @@ async function triggerCapture(): Promise<void> {
         playGood();
         addCapturedRow({
           id: crypto.randomUUID(),
-          cardType: result.cardType.trim(),
+          cardTypeId: result.cardTypeId,
+          cardDescription: result.cardDescription.trim(),
+          version: result.version.trim(),
           serial: normalized,
           addedAt: Date.now()
         });
-        const dup = state.captured.filter((r) => normalizeSerial(r.serial) === normalized).length > 1;
+        const dup =
+          state.captured.filter(
+            (r) => normalizeSerial(r.serial, r.cardTypeId) === normalized
+          ).length > 1;
         flashStatus(
           dup ? 'review' : 'added',
           dup ? 'DUPLICATE ⚠' : 'ADDED ✓',
-          `${ms}ms · ${dup ? 'serial already in list' : `${state.captured.length} captured`} · conf ${conf}`
+          `${ms}ms · ${result.cardTypeId} · ${dup ? 'serial already in list' : `${state.captured.length} captured`} · conf ${conf}`
         );
         if (dup) playBuzz();
       } else {
-        const reason = !formatOk
-          ? "serial didn't match format"
-          : `confidence ${conf} < ${state.settings.minConfidence}`;
+        const reason =
+          result.cardTypeId === 'unknown'
+            ? 'unrecognized card type'
+            : !formatOk
+              ? `serial didn't match ${result.cardTypeId} format`
+              : `confidence ${conf} < ${state.settings.minConfidence}`;
         playBuzz();
         addReviewItem({
           id: crypto.randomUUID(),
           thumbnailDataUrl: frames.thumbJpeg,
           rawText: `(conf ${conf}) ${result.raw}`,
-          cardType: result.cardType.trim(),
+          cardTypeId: result.cardTypeId,
+          cardDescription: result.cardDescription.trim(),
+          version: result.version.trim(),
           serial: result.serial.trim(),
           capturedAt: Date.now()
         });
@@ -809,7 +904,9 @@ async function triggerCapture(): Promise<void> {
         id: crypto.randomUUID(),
         thumbnailDataUrl: frames.thumbJpeg,
         rawText: `Error: ${(err as Error).message}`,
-        cardType: '',
+        cardTypeId: 'unknown',
+        cardDescription: '',
+        version: '',
         serial: '',
         capturedAt: Date.now()
       });
@@ -836,7 +933,7 @@ function deleteCapturedRow(id: string): void {
   renderCaptured();
 }
 
-function updateCapturedRow(id: string, field: 'cardType' | 'serial', value: string): void {
+function updateCapturedRow(id: string, field: 'cardDescription' | 'version' | 'serial', value: string): void {
   const row = state.captured.find((r) => r.id === id);
   if (!row) return;
   row[field] = value;
@@ -850,10 +947,10 @@ function renderCaptured(): void {
   emptyState.style.display = state.captured.length === 0 ? 'block' : 'none';
   capturedTbody.innerHTML = '';
 
-  // Build serial -> count map for duplicate highlight
+  // Build (cardType + serial) -> count map for duplicate highlight
   const counts = new Map<string, number>();
   for (const r of state.captured) {
-    const k = normalizeSerial(r.serial);
+    const k = normalizeSerial(r.serial, r.cardTypeId);
     if (!k) continue;
     counts.set(k, (counts.get(k) ?? 0) + 1);
   }
@@ -861,19 +958,31 @@ function renderCaptured(): void {
   for (const row of state.captured) {
     const tr = document.createElement('tr');
     tr.dataset.id = row.id;
-    const dup = counts.get(normalizeSerial(row.serial)) ?? 0;
+    const dup = counts.get(normalizeSerial(row.serial, row.cardTypeId)) ?? 0;
     if (dup > 1) tr.classList.add('duplicate');
 
-    const tdType = document.createElement('td');
-    const inputType = document.createElement('input');
-    inputType.type = 'text';
-    inputType.className = 'card-type';
-    inputType.value = row.cardType;
-    inputType.placeholder = 'Card type';
-    inputType.addEventListener('input', () =>
-      updateCapturedRow(row.id, 'cardType', inputType.value)
+    const tdDesc = document.createElement('td');
+    const inputDesc = document.createElement('input');
+    inputDesc.type = 'text';
+    inputDesc.className = 'card-desc';
+    inputDesc.value = row.cardDescription;
+    inputDesc.placeholder = 'Description';
+    inputDesc.title = `card_type_id: ${row.cardTypeId}`;
+    inputDesc.addEventListener('input', () =>
+      updateCapturedRow(row.id, 'cardDescription', inputDesc.value)
     );
-    tdType.appendChild(inputType);
+    tdDesc.appendChild(inputDesc);
+
+    const tdVersion = document.createElement('td');
+    const inputVersion = document.createElement('input');
+    inputVersion.type = 'text';
+    inputVersion.className = 'version';
+    inputVersion.value = row.version;
+    inputVersion.placeholder = 'Version';
+    inputVersion.addEventListener('input', () =>
+      updateCapturedRow(row.id, 'version', inputVersion.value)
+    );
+    tdVersion.appendChild(inputVersion);
 
     const tdSerial = document.createElement('td');
     const inputSerial = document.createElement('input');
@@ -895,7 +1004,8 @@ function renderCaptured(): void {
     delBtn.addEventListener('click', () => deleteCapturedRow(row.id));
     tdActions.appendChild(delBtn);
 
-    tr.appendChild(tdType);
+    tr.appendChild(tdDesc);
+    tr.appendChild(tdVersion);
     tr.appendChild(tdSerial);
     tr.appendChild(tdActions);
     capturedTbody.appendChild(tr);
@@ -927,14 +1037,16 @@ function confirmReviewItem(id: string): void {
   // Move into captured even if serial format isn't perfect — user has reviewed.
   addCapturedRow({
     id: crypto.randomUUID(),
-    cardType: item.cardType.trim(),
-    serial: normalizeSerial(item.serial),
+    cardTypeId: item.cardTypeId,
+    cardDescription: item.cardDescription.trim(),
+    version: item.version.trim(),
+    serial: normalizeSerial(item.serial, item.cardTypeId),
     addedAt: Date.now()
   });
   discardReviewItem(id);
 }
 
-function updateReviewItem(id: string, field: 'cardType' | 'serial', value: string): void {
+function updateReviewItem(id: string, field: 'cardDescription' | 'version' | 'serial', value: string): void {
   const item = state.review.find((r) => r.id === id);
   if (!item) return;
   item[field] = value;
@@ -970,17 +1082,29 @@ function renderReview(): void {
       fields.appendChild(raw);
     }
 
-    const typeInput = document.createElement('input');
-    typeInput.type = 'text';
-    typeInput.value = item.cardType;
-    typeInput.placeholder = 'Card type';
-    typeInput.addEventListener('input', () => updateReviewItem(item.id, 'cardType', typeInput.value));
-    fields.appendChild(typeInput);
+    const typeBadge = document.createElement('div');
+    typeBadge.className = 'review-type-badge';
+    typeBadge.textContent = item.cardTypeId;
+    fields.appendChild(typeBadge);
+
+    const descInput = document.createElement('input');
+    descInput.type = 'text';
+    descInput.value = item.cardDescription;
+    descInput.placeholder = 'Description';
+    descInput.addEventListener('input', () => updateReviewItem(item.id, 'cardDescription', descInput.value));
+    fields.appendChild(descInput);
+
+    const versionInput = document.createElement('input');
+    versionInput.type = 'text';
+    versionInput.value = item.version;
+    versionInput.placeholder = 'Version';
+    versionInput.addEventListener('input', () => updateReviewItem(item.id, 'version', versionInput.value));
+    fields.appendChild(versionInput);
 
     const serialInput = document.createElement('input');
     serialInput.type = 'text';
     serialInput.value = item.serial;
-    serialInput.placeholder = 'Serial (8 hex byte pairs)';
+    serialInput.placeholder = 'Serial';
     serialInput.addEventListener('input', () => updateReviewItem(item.id, 'serial', serialInput.value));
     fields.appendChild(serialInput);
 
@@ -1037,19 +1161,22 @@ function csvField(s: string): string {
 }
 
 function buildCsv(): string {
-  const lines = ['card_type,serial_number'];
+  const lines = ['card_description,version,serial'];
   for (const r of state.captured) {
-    lines.push(`${csvField(r.cardType)},${csvField(r.serial)}`);
+    lines.push(
+      `${csvField(r.cardDescription)},${csvField(r.version)},${csvField(r.serial)}`
+    );
   }
   return lines.join('\r\n');
 }
 
 function buildTsv(): string {
-  const lines = ['card_type\tserial_number'];
+  const lines = ['card_description\tversion\tserial'];
   for (const r of state.captured) {
-    const t = r.cardType.replace(/\t/g, ' ');
+    const d = r.cardDescription.replace(/\t/g, ' ');
+    const v = r.version.replace(/\t/g, ' ');
     const s = r.serial.replace(/\t/g, ' ');
-    lines.push(`${t}\t${s}`);
+    lines.push(`${d}\t${v}\t${s}`);
   }
   return lines.join('\r\n');
 }
@@ -1122,19 +1249,9 @@ function syncSettingsToInputs(): void {
     out.value = String(state.settings.thresholds[k]);
   }
 
-  serialFormatInput.value = state.settings.serialFormat;
-  customSerialRegexInput.value = state.settings.customSerialRegex;
-  customSerialHintInput.value = state.settings.customSerialHint;
+  customPromptInput.value = state.settings.customPrompt;
   minConfidenceInput.value = String(state.settings.minConfidence);
   minConfidenceOut.value = state.settings.minConfidence.toFixed(2);
-  syncCustomSerialVisibility();
-}
-
-function syncCustomSerialVisibility(): void {
-  const isCustom = state.settings.serialFormat === 'custom';
-  document.querySelectorAll<HTMLLabelElement>('label.custom-only[data-when="custom"]').forEach((el) => {
-    el.hidden = !isCustom;
-  });
 }
 
 function openSettings(): void {
@@ -1221,18 +1338,14 @@ tuneBtn.addEventListener('click', () => {
   );
 });
 
-serialFormatInput.addEventListener('change', () => {
-  state.settings.serialFormat = serialFormatInput.value as SerialFormat;
-  saveState();
-  syncCustomSerialVisibility();
-});
-customSerialRegexInput.addEventListener('input', () => {
-  state.settings.customSerialRegex = customSerialRegexInput.value.trim();
+customPromptInput.addEventListener('input', () => {
+  state.settings.customPrompt = customPromptInput.value;
   saveState();
 });
-customSerialHintInput.addEventListener('input', () => {
-  state.settings.customSerialHint = customSerialHintInput.value.trim();
+resetPromptBtn.addEventListener('click', () => {
+  state.settings.customPrompt = DEFAULT_PROMPT;
   saveState();
+  customPromptInput.value = DEFAULT_PROMPT;
 });
 minConfidenceInput.addEventListener('input', () => {
   const v = Number(minConfidenceInput.value);

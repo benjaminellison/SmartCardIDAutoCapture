@@ -1,22 +1,23 @@
 # Smart Card Disposal Logger
 
-A single-page web app for fast, in-browser logging of smart-card serial numbers from a webcam feed. The detector waits for a still, sharp white card, snaps automatically, sends the frame to a vision model via [OpenRouter](https://openrouter.ai), and adds the parsed serial to a downloadable list. Optimized for stack-and-peel throughput — running through ~100 cards as fast as you can flip them.
+A single-page web app for fast, in-browser logging of U.S. Department of State PKI smart-card information from a webcam feed. The detector waits for a still, sharp white card, snaps automatically, sends the frame to a vision model via [OpenRouter](https://openrouter.ai), and adds the parsed fields (description, version, serial) to a downloadable list. Optimized for stack-and-peel throughput — running through ~100 cards as fast as you can flip them.
 
 Fully client-side. No backend, no database, no login. Runs from `npm run dev` or any static host.
 
 ## Features
 
-- Live webcam capture with camera-source picker
+- Live webcam capture with camera-source picker, pause/resume, and Show/Hide for the API key
 - Auto-capture state machine (white-card / motion / sharpness signals at ~10fps)
 - ROI overlay with color-coded state (idle / detected / ready)
-- OpenRouter vision OCR with PNG payload, JSON response parsing, and 429/5xx retry
-- Configurable serial format: 8-pair hex, decimal, either, or custom regex
-- Confidence threshold — low-confidence reads are routed to the review tray
-- Inline-editable captured table with duplicate highlighting
+- One-click **Tune to current** button writes detector thresholds from the live readings
+- Card-type aware OCR — recognizes 5 known card types and applies per-type formatting rules
+- Editable OCR prompt in Settings (with Reset to default)
+- Confidence threshold — low-confidence reads are routed to the review tray for human review
+- Inline-editable captured table (description, version, serial) with duplicate highlighting
 - Review tray with thumbnails, edit fields, J/K nav, Enter/D shortcuts
 - WebAudio feedback (click on snap, rising chord on good read, low buzz on bad read or duplicate)
 - CSV download (RFC 4180) and TSV clipboard copy
-- All state persisted to `localStorage`
+- All state persisted to `localStorage`; old rows auto-migrate when the schema expands
 
 ## Setup
 
@@ -50,7 +51,7 @@ Grant camera access on first load. If you have multiple webcams, pick the one yo
 
 Hold a stack of cards in front of the camera, back of the top card facing the lens. The detector watches the central ROI for a still, sharp white surface — when those conditions hold for the configured stability window, it snaps and sends the frame to the model. Peel the top card off; that motion re-arms the detector for the next card.
 
-Reads that pass the format regex *and* meet the confidence floor go straight into the captured table. Anything else lands in the review tray below — physically set those cards aside into a "needs review" pile and clean up at the end via the tray's confirm/discard buttons.
+Reads where the model successfully classifies the card type *and* the serial passes that type's format check *and* the model's confidence meets the floor go straight into the captured table. Anything else lands in the review tray below — physically set those cards aside into a "needs review" pile and clean up at the end via the tray's confirm/discard buttons.
 
 ### Status indicator
 
@@ -60,8 +61,9 @@ The giant banner above the video shows the current pipeline state:
 - `STEADY…` — white card detected but moving or out of focus
 - `OCR…` — frame sent, awaiting model response
 - `ADDED ✓` — valid serial added to the table
-- `REVIEW ⚠` — invalid format, low confidence, or duplicate; sent to review tray
+- `REVIEW ⚠` — invalid format, low confidence, unrecognized card type, or duplicate; sent to review tray
 - `OCR ERROR` — provider error after retries
+- `PAUSED` — camera off; click Resume to continue
 
 ### Keyboard shortcuts
 
@@ -82,7 +84,11 @@ The live metrics line under the video shows the four signals the detector watche
 bright 152 cvar 18 motion 3 sharp 95 · state CARD_STILL
 ```
 
-Each value is **green** when it passes its threshold, **red** when it fails. **All four green simultaneously for the configured stability window = snap.** Open Settings to adjust:
+Each value is **green** when it passes its threshold, **red** when it fails. **All four green simultaneously for the configured stability window = snap.**
+
+**Quickest path:** put a representative card in the frame, hold steady, and click the **Tune to current** button next to the metrics line. It snapshots the readings into the four threshold sliders with sensible margins so this same view passes plus a bit of slack. Stability window is left alone (it's time-based).
+
+To tune manually in Settings:
 
 - `White brightness` — mean ROI brightness must be above this. Lower if cards aren't being detected (typical office lighting often needs 130–150).
 - `Color variance (max)` — RGB-channel spread must be below this. Raise if your webcam has a tint (try 40–60).
@@ -90,29 +96,38 @@ Each value is **green** when it passes its threshold, **red** when it fails. **A
 - `Sharpness (min)` — Laplacian variance must be above this.
 - `Stability window (ms)` — all four signals must hold for this long before triggering. Bump to 800–1000ms if you see the detector firing before autofocus settles.
 
-The console logs `OCR ###ms conf=... fullSharp=... type=... serial=...` for every capture. Compare `fullSharp` (full-resolution sharpness on the actual frame sent) to the live `sharp` (downsampled detector value) — if `fullSharp` is consistently low while `sharp` reads high, your camera's autofocus is hunting and you should lengthen the stability window.
+The console logs `OCR ###ms conf=... fullSharp=... cardType=... desc=... ver=... serial=...` for every capture. Compare `fullSharp` (full-resolution sharpness on the actual frame sent) to the live `sharp` (downsampled detector value) — if `fullSharp` is consistently low while `sharp` reads high, your camera's autofocus is hunting and you should lengthen the stability window.
 
-### Serial format
+## Recognized card types
 
-Pick the format on the Settings dialog:
+The OCR prompt describes 5 known card types and tells the model exactly how to extract description / version / serial for each. Per-type validators reject malformed serials and route them to the review tray.
 
-- **Hex (8 pairs)** — `12 34 AB CD 56 78 EF 90`
-- **Decimal** — digits only, six or more characters
-- **Either** — accepts either of the above
-- **Custom regex** — provide a JS regex and a one-line prompt hint that tells the model what to look for
+| Type ID | Description | Version | Serial format |
+|---|---|---|---|
+| `gd-fips-201-sce-v7` | `G+D FIPS 201 SCE` | `7.0` | 6–10 alphanumeric chars |
+| `gd-fips-201-sce-v3-2` | `G+D FIPS 201 SCE` or `G&D FIPS 201 SCE` (preserve `&` vs `+`) | `3.2` | TWO serials joined by ` / ` (long-with-dashes first, short second) |
+| `safenet-sc650` | `SafeNet AT SC650` (older may omit "AT") | `v4.2k`, `v4.1`, older `v2.01` | 20 hex digits with dashes preserved (`XXXX-XXXX-XXXX-XXXX-XXXX`) |
+| `gemalto-idprime-md` | `Gemalto IDPrime MD` (the "Gemalto" prefix must be preserved) | `RevB` if printed; `1.0` otherwise | 16 hex chars as 8 byte pairs separated by single spaces, uppercase |
+| `idemia-id-one-piv` | `ID-One PIV ... from IDEMIA` | e.g. `2.4` | hyphenated alphanumeric (the `P/N` is **not** the serial) |
 
-The prompt sent to the model is built from the chosen format so the model knows whether to expect hex or numeric output.
+Anything that doesn't match a known type is classified `unknown` and routed to the review tray for manual handling.
+
+### Editing the prompt
+
+The full prompt with all per-type rules and warnings (don't drop "Gemalto", ignore the hashed-out line below the real text on older SafeNet, P/N is not the serial, etc.) is editable in **Settings → OCR → Prompt**. Tweak it to handle a new card type, correct a recurring misread, or shorten it for a different model. Click **Reset prompt** to restore the bundled default.
+
+The prompt is part of every OCR request, so changes take effect immediately on the next capture.
 
 ### Model selection
 
-Set `VITE_OPENROUTER_MODEL` in `.env.local`, or override at runtime in the Settings dialog. Free models on OpenRouter share aggressive upstream rate limits — fine for casual testing but you'll hit walls running 100 cards in a session. Cheap paid VLMs (Gemini 2.5 Flash Lite, Claude Haiku 4.5) cost cents per session and are dramatically more reliable. Image-editing models like Sourceful Riverflow won't work — they don't return text.
+Set `VITE_OPENROUTER_MODEL` in `.env.local`, or override at runtime in the Settings dialog. Free models on OpenRouter share aggressive upstream rate limits and are gated by the OpenRouter account-level data policy — fine for casual testing but you'll hit walls running 100 cards in a session. Cheap paid VLMs (Gemini 2.5 Flash Lite, Claude Haiku 4.5) cost cents per session and are dramatically more reliable. Image-editing models like Sourceful Riverflow won't work — they don't return text.
 
 ## Stack
 
 - Vanilla TypeScript + Vite. No framework, no UI library.
 - Single `src/app.ts`, one CSS file, native `<dialog>` for the settings panel.
 - WebAudio API for tones (no asset files).
-- `localStorage` key `scdl:state:v1` for persistence.
+- `localStorage` key `scdl:state:v1` for persistence; schema migrations are handled in `loadState`.
 
 ## Privacy
 

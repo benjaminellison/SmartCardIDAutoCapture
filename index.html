@@ -68,7 +68,8 @@
         <table id="capturedTable">
           <thead>
             <tr>
-              <th>Card type</th>
+              <th>Description</th>
+              <th>Version</th>
               <th>Serial</th>
               <th aria-label="Actions"></th>
             </tr>
@@ -108,23 +109,11 @@
           <input type="text" id="modelInput" spellcheck="false" />
         </label>
 
-        <fieldset class="serial-format">
-          <legend>Serial format</legend>
-          <label>Format
-            <select id="serialFormatInput">
-              <option value="hex8">8-pair hex (e.g. 12 34 AB CD 56 78 EF 90)</option>
-              <option value="decimal">Decimal (digits only)</option>
-              <option value="either">Either hex or decimal</option>
-              <option value="custom">Custom regex</option>
-            </select>
-          </label>
-          <label class="custom-only" data-when="custom">Custom regex
-            <input type="text" id="customSerialRegexInput" placeholder="^[A-Z0-9]{10}$" spellcheck="false" />
-            <small>JS regex tested against the normalized (uppercase, single-spaced) serial.</small>
-          </label>
-          <label class="custom-only" data-when="custom">Prompt hint
-            <input type="text" id="customSerialHintInput" placeholder="e.g. 10 digits with no separators" />
-            <small>One-line hint describing the format to the OCR model.</small>
+        <fieldset class="ocr">
+          <legend>OCR</legend>
+          <label>Prompt sent to the model
+            <textarea id="customPromptInput" rows="14" spellcheck="false"></textarea>
+            <small>Sent on every capture along with the card image. Edit to tune for new card types or correct recurring mistakes. Use <strong>Reset prompt</strong> below to restore the default with all known card-type rules.</small>
           </label>
           <label>
             <span>Min confidence to accept <output id="minConfidenceOut"></output></span>
@@ -171,6 +160,7 @@
 
         <div class="dialog-actions">
           <button type="button" id="testCaptureBtn">Test capture</button>
+          <button type="button" id="resetPromptBtn">Reset prompt</button>
           <button type="button" id="resetThresholdsBtn">Reset thresholds</button>
           <button type="button" id="doneSettingsBtn" class="primary">Done</button>
         </div>

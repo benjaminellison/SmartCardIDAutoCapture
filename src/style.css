@@ -295,6 +295,29 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
   padding: 1rem 0;
 }
 
+textarea {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  resize: vertical;
+  min-height: 6rem;
+}
+
+textarea:focus { outline: none; border-color: var(--accent); }
+
+.review-type-badge {
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
+  font-size: 0.7rem;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 /* Review tray */
 
 .review {
@@ -431,7 +454,7 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 }
 
 fieldset.thresholds,
-fieldset.serial-format {
+fieldset.ocr {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.75rem 1rem;
@@ -440,21 +463,21 @@ fieldset.serial-format {
 }
 
 fieldset.thresholds legend,
-fieldset.serial-format legend {
+fieldset.ocr legend {
   font-size: 0.85rem;
   font-weight: 500;
   padding: 0 0.4rem;
 }
 
 fieldset.thresholds label,
-fieldset.serial-format label {
+fieldset.ocr label {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0.25rem;
 }
 
 fieldset.thresholds label > span,
-fieldset.serial-format label > span {
+fieldset.ocr label > span {
   display: flex;
   justify-content: space-between;
   font-size: 0.82rem;
@@ -462,7 +485,7 @@ fieldset.serial-format label > span {
 }
 
 fieldset.thresholds output,
-fieldset.serial-format output {
+fieldset.ocr output {
   font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
   color: inherit;
 }
