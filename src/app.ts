@@ -1171,12 +1171,12 @@ function buildCsv(): string {
 }
 
 function buildTsv(): string {
-  const lines = ['card_description\tversion\tserial'];
+  const lines = ['card_description,version,serial'];
   for (const r of state.captured) {
-    const d = r.cardDescription.replace(/\t/g, ',');
-    const v = r.version.replace(/\t/g, ',');
-    const s = r.serial.replace(/\t/g, ',');
-    lines.push(`${d}\t${v}\t${s}`);
+    const d = r.cardDescription.replace(/\t/g, ' ');
+    const v = r.version.replace(/\t/g, ' ');
+    const s = r.serial.replace(/\t/g, ' ');
+    lines.push(`${d},${v},${s}`);
   }
   return lines.join('\r\n');
 }
