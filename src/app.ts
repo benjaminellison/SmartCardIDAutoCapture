@@ -1173,9 +1173,9 @@ function buildCsv(): string {
 function buildTsv(): string {
   const lines = ['card_description\tversion\tserial'];
   for (const r of state.captured) {
-    const d = r.cardDescription.replace(/\t/g, ' ');
-    const v = r.version.replace(/\t/g, ' ');
-    const s = r.serial.replace(/\t/g, ' ');
+    const d = r.cardDescription.replace(/\t/g, ',');
+    const v = r.version.replace(/\t/g, ',');
+    const s = r.serial.replace(/\t/g, ',');
     lines.push(`${d}\t${v}\t${s}`);
   }
   return lines.join('\r\n');
